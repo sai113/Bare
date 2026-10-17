@@ -13,12 +13,15 @@ use std::{
 
 use cef::*;
 
-use crate::{block::js_string, downloads, network, settings, system, update};
+use crate::{block::js_string, bookmarks, downloads, history, network, passwords, settings, system, update};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
     Downloads,
     Settings,
+    History,
+    Bookmarks,
+    Passwords,
 }
 
 impl Page {
@@ -26,6 +29,9 @@ impl Page {
         match self {
             Page::Downloads => "downloads",
             Page::Settings => "settings",
+            Page::History => "history",
+            Page::Bookmarks => "bookmarks",
+            Page::Passwords => "passwords",
         }
     }
 
@@ -33,6 +39,9 @@ impl Page {
         match self {
             Page::Downloads => "Downloads",
             Page::Settings => "Settings",
+            Page::History => "History",
+            Page::Bookmarks => "Bookmarks",
+            Page::Passwords => "Passwords",
         }
     }
 
@@ -44,12 +53,15 @@ impl Page {
     pub fn from_address(input: &str) -> Option<Page> {
         let rest = input.trim().to_ascii_lowercase();
         let rest = rest.strip_prefix("bare://")?.trim_end_matches('/');
-        [Page::Downloads, Page::Settings].into_iter().find(|p| p.name() == rest)
+        [Page::Downloads, Page::Settings, Page::History, Page::Bookmarks, Page::Passwords].into_iter().find(|p| p.name() == rest)
     }
 }
 
-/// Random per-session secret, from the OS-seeded hasher keys.
-static SECRET: LazyLock<String> = LazyLock::new(|| {
+/// Random per-session secret.
+static SECRET: LazyLock<String> = LazyLock::new(random_token);
+
+/// 128 bits as hex that no page can guess: SipHash keyed from OS randomness (every call differs).
+pub fn random_token() -> String {
     let mut out = String::new();
     for _ in 0..2 {
         let mut h = RandomState::new().build_hasher();
@@ -57,7 +69,7 @@ static SECRET: LazyLock<String> = LazyLock::new(|| {
         out.push_str(&format!("{:016x}", h.finish()));
     }
     out
-});
+}
 
 const ACTION_HOST: &str = "https://bare.invalid/";
 
@@ -97,7 +109,54 @@ fn state_json(page: Page) -> String {
     match page {
         Page::Downloads => downloads_json(),
         Page::Settings => settings_json(),
+        Page::History => history_json(),
+        Page::Bookmarks => bookmarks_json(),
+        Page::Passwords => passwords_json(),
     }
+}
+
+/// Search text on bare://history (set by its search box).
+static HISTORY_QUERY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn set_history_query(q: &str) {
+    *HISTORY_QUERY.lock().unwrap_or_else(|e| e.into_inner()) = q.chars().take(200).collect();
+}
+
+fn history_json() -> String {
+    let query = HISTORY_QUERY.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let items: Vec<String> = history::recent(&query, 500)
+        .iter()
+        .map(|e| format!("{{\"url\":{},\"title\":{},\"time\":{}}}", js_string(&e.url), js_string(&e.title), e.last))
+        .collect();
+    format!("{{\"query\":{},\"items\":[{}]}}", js_string(&query), items.join(","))
+}
+
+fn bookmarks_json() -> String {
+    let items: Vec<String> = bookmarks::all()
+        .iter()
+        .map(|b| format!("{{\"url\":{},\"title\":{},\"folder\":{}}}", js_string(&b.url), js_string(&b.title), js_string(&b.folder)))
+        .collect();
+    let sources: Vec<String> = bookmarks::import_sources()
+        .iter()
+        .map(|(id, name, _)| format!("{{\"id\":\"{id}\",\"name\":{}}}", js_string(name)))
+        .collect();
+    let bar = settings::get().bookmarks_bar;
+    format!(
+        "{{\"items\":[{}],\"sources\":[{}],\"bar\":{bar},\"notice\":{}}}",
+        items.join(","),
+        sources.join(","),
+        js_string(&notice())
+    )
+}
+
+/// Sites and usernames only: a password is sent to the page when the user asks to see it.
+fn passwords_json() -> String {
+    let items: Vec<String> = passwords::all()
+        .iter()
+        .map(|l| format!("{{\"origin\":{},\"site\":{},\"username\":{}}}", js_string(&l.origin), js_string(passwords::site(&l.origin)), js_string(&l.username)))
+        .collect();
+    let never: Vec<String> = passwords::never_list().iter().map(|o| js_string(o)).collect();
+    format!("{{\"items\":[{}],\"never\":[{}],\"offer\":{}}}", items.join(","), never.join(","), settings::get().save_passwords)
 }
 
 fn downloads_json() -> String {
@@ -168,7 +227,8 @@ fn settings_json() -> String {
         js_string(&notice()),
     );
     format!(
-        "{{{net}\"registered\":{},\"isDefault\":{},\"search\":\"{}\",\"engines\":[{}],\"blocking\":{},\"cosmetic\":{},\"social\":{},\"cookies\":{},\"allowed\":[{}],\"ask\":{},\"autoUpdate\":{},\"wipe\":{},\"version\":{},\"update\":{},\"updateReady\":{},\"updateEnabled\":{}}}",
+        "{{{net}\"newTabHome\":{},\"registered\":{},\"isDefault\":{},\"search\":\"{}\",\"engines\":[{}],\"blocking\":{},\"cosmetic\":{},\"social\":{},\"cookies\":{},\"allowed\":[{}],\"ask\":{},\"autoUpdate\":{},\"wipe\":{},\"version\":{},\"update\":{},\"updateReady\":{},\"updateEnabled\":{}}}",
+        s.new_tab_home,
         system::registered_as_browser(),
         system::is_default_browser(),
         s.search.id(),
@@ -204,12 +264,80 @@ select{background:var(--card)}input[type=checkbox]{width:18px;height:18px;accent
 .top{display:flex;align-items:center;justify-content:space-between}
 input[type=text]{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 8px;width:280px;max-width:45vw}
 input[type=text]:focus{outline:none;border-color:var(--accent)}.notice{color:var(--danger)}
+.day{font-weight:600;color:var(--muted);padding:14px 0 4px;font-size:12.5px}.time{width:56px;flex:none}a.name{color:var(--fg);text-decoration:none;display:block}a.name:hover{text-decoration:underline}
+.secret{font-family:ui-monospace,Consolas,monospace;color:var(--muted);user-select:all;max-width:40%;overflow-wrap:anywhere}
+.tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}.inline{display:flex;gap:6px;align-items:center;margin-left:auto}.notice-ok{margin-bottom:10px;color:var(--accent)}
 "#;
 
 const SCRIPT_COMMON: &str = r#"
 const A=(name,params)=>{location.href=PREFIX+name+(params?'?'+new URLSearchParams(params):'')};
 const el=(tag,props,...kids)=>{const e=document.createElement(tag);Object.assign(e,props||{});for(const k of kids)if(k!=null)e.append(k);return e};
 const size=n=>n<1024?n+' B':n<1048576?(n/1024).toFixed(0)+' KB':n<1073741824?(n/1048576).toFixed(1)+' MB':(n/1073741824).toFixed(2)+' GB';
+"#;
+
+const HISTORY_SCRIPT: &str = r#"
+function render(s){
+  const q=document.getElementById('q'); if(document.activeElement!==q)q.value=s.query;
+  const list=document.getElementById('list');list.replaceChildren();
+  if(!s.items.length){list.append(el('div',{className:'empty',textContent:s.query?'No matches.':'No history yet.'}));return}
+  let day='';
+  for(const e of s.items){
+    const d=new Date(e.time*1000);
+    const label=d.toLocaleDateString(undefined,{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+    if(label!==day){day=label;list.append(el('div',{className:'day',textContent:label}))}
+    const link=el('a',{href:e.url,className:'name',textContent:e.title||e.url,title:e.url});
+    list.append(el('div',{className:'row'},el('div',{className:'sub time',textContent:d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}),
+      el('div',{className:'grow'},link,el('div',{className:'sub',textContent:e.url})),
+      el('button',{textContent:'Remove',onclick:()=>A('hist-delete',{url:e.url})})));
+  }
+}
+let t=0;document.addEventListener('input',ev=>{if(ev.target.id==='q'){clearTimeout(t);t=setTimeout(()=>A('hist-search',{q:ev.target.value}),300)}});
+"#;
+
+const BOOKMARKS_SCRIPT: &str = r#"
+function render(s){
+  const top=document.getElementById('tools');top.replaceChildren();
+  for(const src of s.sources)top.append(el('button',{textContent:'Import from '+src.name,onclick:()=>A('bm-import',{from:src.id})}));
+  top.append(el('label',{className:'inline'},el('input',{type:'checkbox',checked:s.bar,onchange:e=>A('set',{key:'bookmarksBar',value:e.target.checked})}),' Show bookmarks bar'));
+  const n=document.getElementById('notice');n.textContent=s.notice;n.style.display=s.notice?'block':'none';
+  const list=document.getElementById('list');list.replaceChildren();
+  if(!s.items.length){list.append(el('div',{className:'empty',textContent:'No bookmarks yet. Press Ctrl+D or the ☆ button to bookmark a page.'}));return}
+  let folder=null;
+  for(const b of [...s.items].sort((a,b)=>a.folder.localeCompare(b.folder))){
+    if(b.folder!==folder){folder=b.folder;list.append(el('div',{className:'day',textContent:folder||'Bookmarks bar'}))}
+    list.append(el('div',{className:'row'},
+      el('div',{className:'grow'},el('a',{href:b.url,className:'name',textContent:b.title||b.url,title:b.url}),el('div',{className:'sub',textContent:b.url})),
+      el('button',{textContent:'Rename',onclick:()=>{const t=prompt('Name',b.title);if(t!=null&&t.trim())A('bm-rename',{url:b.url,title:t})}}),
+      el('button',{className:'danger',textContent:'Delete',onclick:()=>A('bm-delete',{url:b.url})})));
+  }
+}
+"#;
+
+const PASSWORDS_SCRIPT: &str = r#"
+const shown=new Map(),k=(o,u)=>o+'\n'+u;let last=null;
+function reveal(o,u,p){shown.set(k(o,u),p);render(last)}
+function render(s){
+  last=s;
+  const c=el('input',{type:'checkbox',checked:s.offer,onchange:()=>A('pw-offer',{value:c.checked})});
+  document.getElementById('offer').replaceChildren(el('label',{className:'row'},el('div',{className:'grow'},el('div',{textContent:'Offer to save passwords'}),
+    el('div',{className:'sub',textContent:'Saved passwords are encrypted for your Windows account and only filled in when you press 🔑 in the address bar.'})),c));
+  const q=document.getElementById('q').value.trim().toLowerCase();
+  const items=s.items.filter(i=>!q||i.site.includes(q)||i.username.toLowerCase().includes(q));
+  const list=document.getElementById('list');list.replaceChildren();
+  if(!items.length)list.append(el('div',{className:'empty',textContent:s.items.length?'No matches.':'No saved passwords yet. Bare offers to save one when you sign in to a site.'}));
+  for(const i of items){
+    const pw=shown.get(k(i.origin,i.username));
+    const secret=el('span',{className:'secret',textContent:pw==null?'••••••••':pw});
+    list.append(el('div',{className:'row'},
+      el('div',{className:'grow'},el('div',{className:'name',textContent:i.site,title:i.origin}),el('div',{className:'sub',textContent:i.username||'(no username)'})),
+      secret,
+      el('button',{textContent:pw==null?'Show':'Hide',onclick:()=>{if(pw==null)A('pw-reveal',{origin:i.origin,username:i.username});else{shown.delete(k(i.origin,i.username));render(last)}}}),
+      el('button',{className:'danger',textContent:'Delete',onclick:()=>{if(confirm('Delete the saved password for '+(i.username||'this login')+' on '+i.site+'?'))A('pw-delete',{origin:i.origin,username:i.username})}})));
+  }
+  const never=document.getElementById('never');
+  never.replaceChildren(...(s.never.length?s.never.map(o=>el('div',{className:'row'},el('div',{className:'grow',textContent:o.replace(/^https?:\/\//,'')}),el('button',{textContent:'Remove',onclick:()=>A('pw-never-remove',{origin:o})}))):[el('div',{className:'row sub',textContent:'None.'})]));
+}
+document.addEventListener('input',ev=>{if(ev.target.id==='q')render(last)});
 "#;
 
 const DOWNLOADS_SCRIPT: &str = r#"
@@ -275,7 +403,8 @@ const toggle=(key,on,label,sub)=>{const c=el('input',{type:'checkbox',checked:on
 function render(s){
   const search=el('select',{onchange:()=>A('set',{key:'search',value:search.value})});
   for(const e of s.engines)search.append(el('option',{value:e.id,textContent:e.name,selected:e.id===s.search}));
-  document.getElementById('search').replaceChildren(el('div',{className:'row'},el('div',{className:'grow',textContent:'Search engine for the address bar'}),search));
+  document.getElementById('search').replaceChildren(el('div',{className:'row'},el('div',{className:'grow',textContent:'Search engine for the address bar'}),search),
+    toggle('newTabHome',s.newTabHome,'New tabs open the search engine’s home page','Otherwise new tabs are blank.'));
   const sites=s.allowed.length?s.allowed.map(h=>el('div',{className:'row'},el('div',{className:'grow',textContent:h}),el('button',{textContent:'Remove',onclick:()=>A('allow-remove',{host:h})}))):[el('div',{className:'row sub',textContent:'None. Use the shield button in the toolbar to turn blocking off for a site.'})];
   document.getElementById('blocking').replaceChildren(
     toggle('blocking',s.blocking,'Block ads, trackers and malware','EasyList, EasyPrivacy, HaGeZi Pro and a malware/tracking domain list.'),
@@ -287,7 +416,8 @@ function render(s){
   renderNetwork(s);
   document.getElementById('privacy').replaceChildren(
     el('div',{className:'row'},el('div',{className:'grow'},el('div',{textContent:'Clear cookies and cache'}),el('div',{className:'sub',textContent:'Signs you out of websites.'})),el('button',{className:'danger',textContent:'Clear now',onclick:()=>{if(confirm('Clear all cookies and cached files?'))A('clear-data')}})),
-    toggle('wipe',s.wipe,'Erase all browsing data on next start','Cookies, cache and all site storage. Turns itself off after running.'));
+    toggle('wipe',s.wipe,'Erase all browsing data on next start','Cookies, cache and all site storage. Turns itself off after running.'),
+    row('Passwords','Saved sign-ins, encrypted for your Windows account.',el('button',{textContent:'Manage passwords',onclick:()=>A('open-passwords')})));
   const upd=el('div',{className:'row'},el('div',{className:'grow'},el('div',{textContent:'Bare '+s.version}),el('div',{className:'sub',textContent:s.update})));
   if(s.updateReady)upd.append(el('button',{className:'primary',textContent:'Restart to update',onclick:()=>A('update-restart')}));
   else if(s.updateEnabled)upd.append(el('button',{textContent:'Check now',onclick:()=>A('update-check')}));
@@ -306,6 +436,21 @@ fn html(page: Page) -> String {
             r#"<main><div class="top"><h1>Downloads</h1><button onclick="A('dl-clear')">Clear list</button></div>
 <div class="sub">Saved to <span id="folder"></span></div><h2>Files</h2><div class="card" id="list"></div></main>"#,
             DOWNLOADS_SCRIPT,
+        ),
+        Page::History => (
+            r#"<main><div class="top"><h1>History</h1><button class="danger" onclick="if(confirm('Clear all browsing history?'))A('hist-clear')">Clear history</button></div>
+<input type="text" id="q" placeholder="Search history" spellcheck="false" style="width:100%;max-width:none;margin-bottom:8px"><div class="card" id="list"></div></main>"#,
+            HISTORY_SCRIPT,
+        ),
+        Page::Bookmarks => (
+            r#"<main><h1>Bookmarks</h1><div class="tools" id="tools"></div><div class="sub notice-ok" id="notice"></div><div class="card" id="list"></div></main>"#,
+            BOOKMARKS_SCRIPT,
+        ),
+        Page::Passwords => (
+            r#"<main><h1>Passwords</h1><div class="card" id="offer"></div>
+<h2>Saved passwords</h2><input type="text" id="q" placeholder="Search passwords" spellcheck="false" style="width:100%;max-width:none;margin-bottom:8px"><div class="card" id="list"></div>
+<h2>Never saved for</h2><div class="card" id="never"></div></main>"#,
+            PASSWORDS_SCRIPT,
         ),
         Page::Settings => (
             r#"<main><h1>Settings</h1>

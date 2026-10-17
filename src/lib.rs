@@ -6,15 +6,25 @@ mod app;
 #[cfg(all(windows, feature = "sandbox"))]
 mod block;
 #[cfg(all(windows, feature = "sandbox"))]
+mod bookmarks;
+#[cfg(all(windows, feature = "sandbox"))]
 mod downloads;
 #[cfg(all(windows, feature = "sandbox"))]
 mod handlers;
+#[cfg(all(windows, feature = "sandbox"))]
+mod history;
+#[cfg(all(windows, feature = "sandbox"))]
+mod memory;
 #[cfg(all(windows, feature = "sandbox"))]
 mod network;
 #[cfg(all(windows, feature = "sandbox"))]
 mod pages;
 #[cfg(all(windows, feature = "sandbox"))]
+mod passwords;
+#[cfg(all(windows, feature = "sandbox"))]
 mod permissions;
+#[cfg(all(windows, feature = "sandbox"))]
+mod reader;
 #[cfg(all(windows, feature = "sandbox"))]
 mod settings;
 #[cfg(all(windows, feature = "sandbox"))]

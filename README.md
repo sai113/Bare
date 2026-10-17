@@ -2,11 +2,13 @@
 
 # Bare
 
+[![CI](https://github.com/sai113/Bare/actions/workflows/ci.yml/badge.svg)](https://github.com/sai113/Bare/actions/workflows/ci.yml)
+
 A minimal, private web browser built on Chromium. Tabs, an address bar, and nothing else.
 
 - **Chromium engine, bundled.** Bare ships its own copy of Chromium through the [Chromium Embedded Framework](https://github.com/chromiumembedded/cef) (CEF), so it doesn't depend on any browser engine installed on the computer.
 - **Sandboxed.** Every web page runs in a locked-down Chromium sandbox process, the same model Chrome uses.
-- **No bloat.** No accounts, sync, telemetry, news feed, shopping, AI assistant, translation, password manager or extension store.
+- **No bloat.** No accounts, sync, telemetry, news feed, shopping, AI assistant, translation or extension store.
 - **Ad and tracker blocking built in**, using the same filter lists and rule syntax as uBlock Origin.
 - **Signed automatic updates**, so security fixes reach users without them doing anything.
 - **Private by default.** HTTPS-only, third-party cookies blocked, notifications denied.
@@ -29,11 +31,18 @@ Prefer no installer? Download `Bare-<version>-windows-x86_64.zip` instead, unzip
 
 | | |
 |---|---|
-| Tabs | `Ctrl+T` new, `Ctrl+W` / `Ctrl+F4` close, `Ctrl+Tab` / `Ctrl+Shift+Tab` switch |
-| Address bar | `Ctrl+L`, `Alt+D` or `F6`. Type a URL or search terms; `Esc` restores the current address |
+| Tabs | `Ctrl+T` new, `Ctrl+W` / `Ctrl+F4` close, `Ctrl+Tab` / `Ctrl+Shift+Tab` switch, `Ctrl+1`…`Ctrl+8` go to a tab, `Ctrl+9` last tab, `Ctrl+Shift+PageUp` / `PageDown` move a tab. Tabs shrink as you open more; the rest are listed under **▾ N**. Hover a tab to see its **memory usage** |
+| New tab | `Ctrl+T` opens your search engine's home page (Google, DuckDuckGo, …) with the cursor in the address bar. Settings → Search can make new tabs blank instead |
+| Address bar | `Ctrl+L`, `Alt+D` or `F6`. Type a URL or search terms. **Suggestions** from your history and bookmarks appear as you type: `↑` / `↓` to pick, `Enter` to go, `Esc` to close |
+| History | `Ctrl+H` opens `bare://history`: search, remove entries, clear all. Nothing is recorded in private windows |
+| Bookmarks | `Ctrl+D` or **☆** bookmarks the page. The **bookmarks bar** (`Ctrl+Shift+B` to show/hide) shows them, with folders as menus and **»** for what doesn't fit. `Ctrl+Shift+O` opens `bare://bookmarks`: rename, delete, and **import from Chrome, Edge or Brave** |
+| Reader view | On articles, a **📖** button appears in the address bar (or press `F9`): the article is shown as clean, readable text, without ads, menus or pop-ups, in light or dark to match Windows. `F9` or **📖 Leave reader** goes back. Uses Mozilla's [Readability](https://github.com/mozilla/readability), the same as Firefox |
+| Passwords | After you sign in, a bar offers to **Save** the password (or **Never for this site**). On that site later, press **🔑** in the address bar to fill it in (a menu if you have several accounts). `bare://passwords` (Settings → Privacy → Manage passwords) lists them: search, show, delete. Nothing is saved in private windows |
+| Zoom | `Ctrl` `+` / `-` / `0`. A **125%** indicator appears when a page isn't at 100%; click it to reset. Remembered per site |
+| Picture-in-picture | Right-click a video → **Picture in picture**, or `Alt+P` for the video on the page |
 | Navigation | `Alt+Left` / `Alt+Right`, `F5` or `Ctrl+R` to reload |
 | Downloads | `Ctrl+J` or the ↓ button opens `bare://downloads`: progress, pause/resume, cancel, open, show in folder. The ↓ button shows live progress. Files go to your Downloads folder, or Bare can ask each time |
-| Settings | The ⚙ button opens `bare://settings`: search engine, blocking, per-site exceptions, download location, clearing browsing data, updates |
+| Settings | The ⚙ button opens `bare://settings`: search engine, new-tab page, blocking, per-site exceptions, download location, clearing browsing data, updates |
 | Blocker | The toolbar shows how many requests were blocked on the page. Click it to turn blocking off for a site that breaks (remembered; manage the list in Settings) |
 | Secure DNS | Settings → Network: Automatic (default, like Chrome), Off, Cloudflare, Google, Quad9, AdGuard, Mullvad, NextDNS, CleanBrowsing, OpenDNS, or a custom DNS-over-HTTPS URL. Applies immediately |
 | Proxy | Settings → Network: system settings (default), no proxy, manual (`http`, `https`, `socks4`, `socks5` + bypass list) or a PAC URL. Applies immediately |
@@ -112,6 +121,8 @@ Update logs are written to `%LOCALAPPDATA%\Bare\update\update.log`.
 - **The address bar never runs code.** `javascript:`, `file:` and `data:` input is treated as a search.
 - **Popups open as tabs**, never as new windows.
 - **Permission prompts are native.** The Allow/Block bar is part of the browser UI, so a page can't draw a fake one or click it. Chromium would normally save these answers forever; Bare resets them when it closes (and on the next start, if it crashed), so "Allow" never silently becomes permanent.
+- **Saved passwords** are encrypted with Windows DPAPI, so only your Windows account can read `passwords.dat`. A login is only offered on the exact site (scheme, host and port) it was saved on, and is only filled when you press 🔑; before filling, Bare checks the page is still on that site. Bare offers to save a login only if the page reporting it is the site the tab is really on, and the report carries a random token that changes with every page load, so an ad or other site embedded in a page can't plant a login for it (tested).
+- **Reader view runs no site code.** The article is shown as a separate local page whose content security policy blocks every script, frame, form and plugin; only text, links and images remain.
 - **Downloads** get safe, unique file names (no path tricks, no overwriting); opening a downloaded program goes through Windows' normal SmartScreen checks.
 - **Less phoning home.** Chromium background networking, component updates, domain reliability reporting, media-router (Cast) discovery, Translate and optimization hints are turned off. Extensions are disabled, so other software can't inject Chrome extensions.
 - **Alloy runtime.** Bare uses CEF's lightweight Alloy mode rather than its Chrome mode, which leaves out Chrome's sign-in, sync and password services.
@@ -139,7 +150,7 @@ src/app.rs        process startup, Chromium settings and privacy defaults
 src/ui.rs         window, tab strip, toolbar (CEF Views)
 src/handlers.rs   per-page callbacks: HTTPS-only, blocking, popups, downloads, built-in page actions
 src/block.rs      ad/tracker blocking (adblock-rust) and cosmetic filtering
-src/pages.rs      bare://downloads and bare://settings
+src/pages.rs      built-in pages: bare://settings, downloads, history, bookmarks, passwords
 src/permissions.rs  site permission rules, wording, session-only grants
 src/network.rs    secure DNS and proxy settings
 src/downloads.rs  download tracking, safe file names, open / show in folder
@@ -151,7 +162,13 @@ src/main.rs       executable entry point (Linux, macOS, Windows without sandbox)
 xtask/            cargo xtask package | keygen | release
 installer/bare.iss  Windows installer (Inno Setup)
 src/system.rs     default-browser status, opening links and files from other apps
-assets/           app icon
+src/history.rs    browsing history and address-bar ranking
+src/bookmarks.rs  bookmarks, the bookmarks bar, import from Chrome/Edge/Brave
+src/memory.rs     per-tab memory use
+src/passwords.rs  password vault (DPAPI-encrypted), login capture and fill
+src/reader.rs     reader view (Mozilla Readability)
+.github/workflows/ci.yml  tests and builds every pull request (GitHub Actions)
+assets/           app icon, Mozilla Readability (Apache-2.0)
 data/             filter lists, update public key
 scripts/          refresh filter lists, regenerate icon
 ```
@@ -169,10 +186,12 @@ scripts/          refresh filter lists, regenerate icon
 - **Proxies that need a username and password** aren't supported yet (there's no sign-in prompt).
 - **Secure DNS with a fixed provider** stops all browsing if your network blocks that provider (as Chrome does). Some networks block Cloudflare's and Quad9's; switch to another provider or Automatic.
 - **Screen sharing** isn't supported yet (it needs a screen/window picker). Camera and microphone work.
+- **Videos in H.264 (`.mp4`) don't play.** Chromium builds for embedding leave out patented codecs; sites using WebM, VP9 or AV1 (YouTube included) work. Streaming services that need DRM (Netflix and similar) don't work either.
+- **Passwords:** Bare doesn't ask for your Windows password before showing saved passwords (Chrome does). It can't yet import passwords from other browsers, and sign-in forms inside embedded frames aren't captured.
+- Tabs can't be dragged to reorder yet; use `Ctrl+Shift+PageUp` / `PageDown`.
 - **Location** uses Windows' location service, so it only works if location is turned on in Windows Settings → Privacy & security → Location.
 - Popups open without `window.opener`, so some "sign in with…" popup flows may not complete.
-- No bookmarks or history UI yet.
 
 ## License
 
-MIT. Chromium and CEF are distributed under their own licenses; their notices ship in `CREDITS.html` inside the packaged app. The filter lists keep their own licenses (see `data/LISTS.md`).
+MIT. Chromium and CEF are distributed under their own licenses; their notices ship in `CREDITS.html` inside the packaged app. The filter lists keep their own licenses (see `data/LISTS.md`). Reader view uses [Mozilla Readability](https://github.com/mozilla/readability) (Apache-2.0; `LICENSE-readability.txt` in the packaged app).

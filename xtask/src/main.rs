@@ -85,6 +85,8 @@ fn package() -> Result<()> {
         }
     }
     fs::copy(root.join("LICENSE"), out.join("LICENSE.txt"))?;
+    // Mozilla Readability (reader mode) is built into Bare.dll.
+    fs::copy(root.join("assets/readability/LICENSE.md"), out.join("LICENSE-readability.txt"))?;
 
     // Filter lists are loaded at runtime from data/ next to the executable.
     let data = out.join("data");
@@ -286,19 +288,26 @@ fn build_installer(root: &Path, version: &str) -> Result<Option<PathBuf>> {
     let Some(iscc) = candidates.into_iter().flatten().find(|p| p.exists()) else { return Ok(None) };
     let dist = root.join("dist");
     let setup = dist.join(format!("BareSetup-{version}.exe"));
-    let _ = fs::remove_file(&setup);
-    let status = Command::new(iscc)
-        .arg("/Q")
-        .arg(format!("/DAppVersion={version}"))
-        .arg(format!("/DSourceDir={}", dist.join("Bare").display()))
-        .arg(format!("/DRepoDir={}", root.display()))
-        .arg(format!("/O{}", dist.display()))
-        .arg(root.join("installer").join("bare.iss"))
-        .status()?;
-    if !status.success() || !setup.exists() {
-        return Err("building the installer failed".into());
+    // Antivirus scanners sometimes lock the new setup exe while Inno Setup stamps it; retry.
+    for attempt in 1..=4 {
+        let _ = fs::remove_file(&setup);
+        let status = Command::new(&iscc)
+            .arg("/Q")
+            .arg(format!("/DAppVersion={version}"))
+            .arg(format!("/DSourceDir={}", dist.join("Bare").display()))
+            .arg(format!("/DRepoDir={}", root.display()))
+            .arg(format!("/O{}", dist.display()))
+            .arg(root.join("installer").join("bare.iss"))
+            .status()?;
+        if status.success() && setup.exists() {
+            return Ok(Some(setup));
+        }
+        if attempt < 4 {
+            println!("  installer build failed (attempt {attempt}), retrying…");
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
     }
-    Ok(Some(setup))
+    Err("building the installer failed".into())
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<()> {

@@ -14,7 +14,7 @@ use std::{
 
 use cef::*;
 
-use crate::{block, downloads, pages, permissions, settings, ui, url};
+use crate::{block, downloads, pages, passwords, permissions, reader, settings, ui, url};
 
 #[derive(Default)]
 pub struct Shared {
@@ -25,6 +25,8 @@ pub struct Shared {
     pub blocked: HashMap<i32, u32>,
     /// Hosts the user explicitly typed as http:// this session (exempt from HTTPS-only).
     pub http_ok: HashSet<String>,
+    /// Token the login-capture script of each browser's current page signs its reports with.
+    pub login_tokens: HashMap<i32, String>,
 }
 
 pub static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(Mutex::default);
@@ -69,6 +71,9 @@ wrap_client! {
     struct BareClient;
 
     impl Client {
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(ContextMenu::new())
+        }
         fn display_handler(&self) -> Option<DisplayHandler> {
             Some(Display::new())
         }
@@ -89,6 +94,18 @@ wrap_client! {
         }
         fn request_handler(&self) -> Option<RequestHandler> {
             Some(Requests::new())
+        }
+
+        /// A page's process reporting its process id (for the tab's memory use).
+        fn on_process_message_received(&self, browser: Option<&mut Browser>, _frame: Option<&mut Frame>, source_process: ProcessId, message: Option<&mut ProcessMessage>) -> ::std::os::raw::c_int {
+            let (Some(b), Some(m)) = (browser, message) else { return 0 };
+            if source_process != ProcessId::RENDERER || CefString::from(&m.name()).to_string() != crate::app::PID_MESSAGE {
+                return 0;
+            }
+            let Some(pid) = m.argument_list().map(|a| a.int(0)).and_then(|p| u32::try_from(p).ok()) else { return 1 };
+            let id = b.identifier();
+            ui::with_ui(move |ui| ui.on_renderer_pid(id, pid));
+            1
         }
     }
 }
@@ -116,6 +133,23 @@ wrap_display_handler! {
         /// message; reply with the generic hide rules that match them.
         fn on_console_message(&self, browser: Option<&mut Browser>, _level: LogSeverity, message: Option<&CefString>, _source: Option<&CefString>, _line: ::std::os::raw::c_int) -> ::std::os::raw::c_int {
             let msg = text(message);
+            if let Some((token, login)) = passwords::parse_report(&msg) {
+                if let (Some(b), Some(login)) = (browser, login) {
+                    let id = b.identifier();
+                    // Only from our script in the page itself, not from frames embedded in it.
+                    if shared().login_tokens.get(&id).is_some_and(|t| t == token) {
+                        ui::with_ui(move |ui| ui.on_login_submitted(id, login));
+                    }
+                }
+                return 1;
+            }
+            if let Some(report) = reader::parse_report(&msg) {
+                if let Some(b) = browser {
+                    let id = b.identifier();
+                    ui::with_ui(move |ui| ui.on_reader_report(id, report));
+                }
+                return 1;
+            }
             let Some(report) = msg.strip_prefix(block::COSMETIC_PREFIX) else { return 0 };
             let Some(b) = browser else { return 1 };
             let page = shared().page_url.get(&b.identifier()).cloned().unwrap_or_default();
@@ -144,16 +178,31 @@ wrap_load_handler! {
             ui::with_ui(move |ui| ui.on_loading(id, is_loading == 1, can_go_back == 1, can_go_forward == 1));
         }
 
-        /// Cosmetic filtering: hide site-specific ad elements, and start reporting class
-        /// names/ids for generic rules.
-        fn on_load_start(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition_type: TransitionType) {
+        /// Reader mode: does the page that just loaded look like an article?
+        fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _http_status_code: ::std::os::raw::c_int) {
             let Some(f) = frame else { return };
+            let page = userfree(&f.url());
+            if f.is_main() == 1 && (page.starts_with("https://") || page.starts_with("http://")) {
+                f.execute_java_script(Some(&CefString::from(reader::check_script().as_str())), None, 0);
+            }
+        }
+
+        /// Cosmetic filtering (hide site-specific ad elements, and start reporting class
+        /// names/ids for generic rules) and watching for logins to offer to save.
+        fn on_load_start(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition_type: TransitionType) {
+            let (Some(b), Some(f)) = (browser, frame) else { return };
             if f.is_main() != 1 {
                 return;
             }
             let page = userfree(&f.url());
             let host = url::host(&page.to_ascii_lowercase()).unwrap_or("").to_string();
             let s = settings::get();
+            // Offer to save passwords typed into this page (never in a private window).
+            if s.save_passwords && !crate::app::is_private() && passwords::origin(&page).is_some() {
+                let token = pages::random_token();
+                shared().login_tokens.insert(b.identifier(), token.clone());
+                f.execute_java_script(Some(&CefString::from(passwords::capture_script(&token).as_str())), None, 0);
+            }
             if host.is_empty() || !s.cosmetic || !s.blocks_on(&host) {
                 return;
             }
@@ -215,8 +264,53 @@ wrap_life_span_handler! {
                 s.page_url.remove(&id);
                 s.page_host.remove(&id);
                 s.blocked.remove(&id);
+                s.login_tokens.remove(&id);
             }
             ui::with_ui(move |ui| ui.on_closed(id));
+        }
+    }
+}
+
+/// Context-menu command id for "Picture in picture" (CEF's user range starts at 26500).
+const MENU_PIP: ::std::os::raw::c_int = 26_501;
+
+/// Toggles picture-in-picture: the video at (x, y) if given, else the playing (or largest)
+/// video on the page.
+pub fn pip_script(at: Option<(i32, i32)>) -> String {
+    let (x, y) = at.unwrap_or((-1, -1));
+    format!(
+        "(async()=>{{try{{if(document.pictureInPictureElement){{await document.exitPictureInPicture();return}}\
+const vids=[...document.querySelectorAll('video')].filter(v=>v.readyState>0&&!v.disablePictureInPicture);\
+let v={x}>=0?document.elementFromPoint({x},{y})?.closest?.('video'):null;\
+if(!v)v=vids.find(v=>!v.paused)||vids.sort((a,b)=>b.clientWidth*b.clientHeight-a.clientWidth*a.clientHeight)[0];\
+if(v)await v.requestPictureInPicture()}}catch(e){{}}}})()"
+    )
+}
+
+wrap_context_menu_handler! {
+    struct ContextMenu;
+
+    impl ContextMenuHandler {
+        /// Adds "Picture in picture" when right-clicking a video.
+        fn on_before_context_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, params: Option<&mut ContextMenuParams>, model: Option<&mut MenuModel>) {
+            let (Some(params), Some(model)) = (params, model) else { return };
+            if params.media_type() == ContextMenuMediaType::VIDEO {
+                if model.count() > 0 {
+                    model.add_separator();
+                }
+                model.add_item(MENU_PIP, Some(&CefString::from("Picture in picture")));
+            }
+        }
+
+        fn on_context_menu_command(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, params: Option<&mut ContextMenuParams>, command_id: ::std::os::raw::c_int, _event_flags: EventFlags) -> ::std::os::raw::c_int {
+            if command_id != MENU_PIP {
+                return 0;
+            }
+            if let Some(f) = frame {
+                let at = params.map(|p| (p.xcoord(), p.ycoord()));
+                f.execute_java_script(Some(&CefString::from(pip_script(at).as_str())), None, 0);
+            }
+            1
         }
     }
 }

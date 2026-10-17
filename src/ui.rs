@@ -14,13 +14,12 @@ use std::{
 use cef::*;
 
 use crate::{
-    downloads, handlers, network,
+    bookmarks, downloads, handlers, history, memory, network,
     pages::{self, Page},
-    permissions, settings, update, url,
+    passwords, permissions, reader, settings, update, url,
 };
 
 const ICON: &[u8] = include_bytes!("../assets/bare.png");
-const MAX_TAB_TITLE: usize = 24;
 const ACTIVE_TAB: u32 = 0x40808080; // translucent grey, readable in light and dark themes
 
 type Job = Box<dyn FnOnce(&mut Ui)>;
@@ -51,6 +50,17 @@ pub fn defer(job: impl FnOnce(&mut Ui) + 'static) {
     post_task(ThreadId::UI, Some(&mut Deferred::new(job)));
 }
 
+/// Like `defer`, but after `ms` milliseconds.
+pub fn defer_after(ms: i64, job: impl FnOnce(&mut Ui) + 'static) {
+    let job: Rc<RefCell<Option<Job>>> = Rc::new(RefCell::new(Some(Box::new(job))));
+    post_delayed_task(ThreadId::UI, Some(&mut Deferred::new(job)), ms);
+}
+
+/// Chromium's zoom level is a power of 1.2 (level 0 = 100%, 1 = 120%, -1 ≈ 83%).
+fn zoom_percent(level: f64) -> i32 {
+    (100.0 * 1.2f64.powf(level)).round() as i32
+}
+
 wrap_task! {
     struct Deferred {
         job: Rc<RefCell<Option<Job>>>,
@@ -73,6 +83,22 @@ wrap_task! {
     impl Task {
         fn execute(&self) {
             self.window.close();
+        }
+    }
+}
+
+/// How often tab memory use is re-read.
+const MEMORY_SAMPLE_MS: i64 = 5_000;
+
+wrap_task! {
+    struct MemoryTimer;
+
+    impl Task {
+        fn execute(&self) {
+            with_ui(|ui| ui.sample_memory());
+            if !is_closing() {
+                post_delayed_task(ThreadId::UI, Some(&mut MemoryTimer::new()), MEMORY_SAMPLE_MS);
+            }
         }
     }
 }
@@ -133,10 +159,33 @@ enum Action {
     UpdateRestart,
     PermissionAllow,
     PermissionBlock,
+    PictureInPicture,
+    HistoryPage,
+    BookmarksPage,
+    ToggleBookmark,
+    ToggleBookmarksBar,
+    OpenBookmark(usize),
+    BookmarkFolder(usize),
+    PickSuggestion(usize),
+    BookmarksMore,
+    TabMenu,
+    SelectTab(usize),
+    LastTab,
+    MoveTabLeft,
+    MoveTabRight,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     Find,
     FindNext,
     FindPrev,
     FindClose,
+    Reader,
+    /// 🔑: fill a saved login (a menu when there are several).
+    Logins,
+    SaveLogin,
+    NeverSaveLogin,
+    DismissLogin,
     /// For text-only buttons that act as labels.
     Nothing,
     Select(u64),
@@ -163,9 +212,41 @@ const SHORTCUTS: &[(Action, c_int, bool, bool, bool)] = &[
     (Action::Find, 0x46, false, true, false),         // Ctrl+F
     (Action::FindNext, 0x72, false, false, false),    // F3
     (Action::FindPrev, 0x72, true, false, false),     // Shift+F3
+    (Action::PictureInPicture, 0x50, false, false, true), // Alt+P
+    (Action::Reader, 0x78, false, false, false),         // F9
+    (Action::HistoryPage, 0x48, false, true, false),       // Ctrl+H
+    (Action::BookmarksPage, 0x4F, true, true, false),      // Ctrl+Shift+O
+    (Action::ToggleBookmark, 0x44, false, true, false),    // Ctrl+D
+    (Action::ToggleBookmarksBar, 0x42, true, true, false), // Ctrl+Shift+B
+    (Action::SelectTab(0), 0x31, false, true, false),  // Ctrl+1 … Ctrl+8
+    (Action::SelectTab(1), 0x32, false, true, false),
+    (Action::SelectTab(2), 0x33, false, true, false),
+    (Action::SelectTab(3), 0x34, false, true, false),
+    (Action::SelectTab(4), 0x35, false, true, false),
+    (Action::SelectTab(5), 0x36, false, true, false),
+    (Action::SelectTab(6), 0x37, false, true, false),
+    (Action::SelectTab(7), 0x38, false, true, false),
+    (Action::LastTab, 0x39, false, true, false),      // Ctrl+9
+    (Action::MoveTabLeft, 0x21, true, true, false),   // Ctrl+Shift+PageUp
+    (Action::MoveTabRight, 0x22, true, true, false),  // Ctrl+Shift+PageDown
+    (Action::ZoomIn, 0xBB, false, true, false),       // Ctrl+=
+    (Action::ZoomIn, 0xBB, true, true, false),        // Ctrl++ (Shift+=)
+    (Action::ZoomIn, 0x6B, false, true, false),       // Ctrl+Numpad+
+    (Action::ZoomOut, 0xBD, false, true, false),      // Ctrl+-
+    (Action::ZoomOut, 0x6D, false, true, false),      // Ctrl+Numpad-
+    (Action::ZoomReset, 0x30, false, true, false),    // Ctrl+0
+    (Action::ZoomReset, 0x60, false, true, false),    // Ctrl+Numpad0
 ];
 const SHORTCUT_BASE: c_int = 1000;
 const EVENTFLAG_SHIFT_DOWN: u32 = 1 << 1;
+
+/// A login the user just submitted, waiting for Save / Never / Not now.
+struct PendingLogin {
+    tab: u64,
+    origin: String,
+    username: String,
+    password: String,
+}
 
 enum Reply {
     Media(MediaAccessCallback, u32),
@@ -232,6 +313,18 @@ struct Tab {
     page: Option<Page>,
     /// Permission requests waiting for an answer, oldest first.
     prompts: VecDeque<PermissionRequest>,
+    /// The page's process and its private memory (bytes), sampled every few seconds.
+    pid: Option<u32>,
+    memory: Option<u64>,
+    /// Last address written to history from this tab (so a re-reported address isn't a new visit).
+    recorded: String,
+    /// Reader mode: the page looks like an article; the reader page this tab made (its data:
+    /// URL and the page it came from); whether that is what it shows now; and the token of the
+    /// article on its way (only an article carrying it is accepted).
+    readerable: bool,
+    reader: Option<(String, String)>,
+    in_reader: bool,
+    reader_pending: Option<String>,
 }
 
 impl Tab {
@@ -239,14 +332,20 @@ impl Tab {
         self.browser.as_ref().map(|b| b.identifier())
     }
 
-    fn label(&self) -> String {
-        let title = match (self.title.trim(), self.url.as_str()) {
+    fn title_text(&self) -> &str {
+        match (self.title.trim(), self.url.as_str()) {
             ("", "") | ("", url::BLANK) | ("about:blank", _) => "New tab",
             ("", u) => u,
             (t, _) => t,
-        };
-        let mut label: String = title.chars().take(MAX_TAB_TITLE).collect();
-        if title.chars().count() > MAX_TAB_TITLE {
+        }
+    }
+
+    /// The tab's title cut to `max_chars`, with a dot while loading.
+    fn label(&self, max_chars: usize) -> String {
+        let title = self.title_text();
+        let max_chars = max_chars.max(1);
+        let mut label: String = title.chars().take(max_chars).collect();
+        if title.chars().count() > max_chars {
             label.push('…');
         }
         if self.loading {
@@ -256,13 +355,58 @@ impl Tab {
     }
 }
 
+/// Launch target meaning "a new tab" (whatever the new-tab setting says).
+pub const NEW_TAB: &str = "bare:new-tab";
+
+/// Rows in the address-bar suggestions.
+const MAX_SUGGESTIONS: usize = 8;
+
+/// Solid colours for the suggestions (they float over the page, so they can't be see-through).
+fn suggest_background() -> u32 {
+    if crate::system::dark_mode() { 0xFF2B2B30 } else { 0xFFFFFFFF }
+}
+
+fn suggest_highlight() -> u32 {
+    if crate::system::dark_mode() { 0xFF45454D } else { 0xFFE3E8F0 }
+}
+
+const TAB_MIN_WIDTH: i32 = 72;
+const TAB_MAX_WIDTH: i32 = 220;
+/// Below this width, inactive tabs hide their ✕ (like Chrome).
+const TAB_CLOSE_MIN_WIDTH: i32 = 120;
+const TAB_CLOSE_WIDTH: i32 = 26;
+const TAB_CHAR_WIDTH: i32 = 7;
+
+/// How the tab strip fits `n` tabs into `avail` pixels: the width of each tab, the first
+/// visible tab and how many are visible. The active tab is always visible; the rest scroll.
+fn tab_layout(n: usize, active: usize, first: usize, avail: i32) -> (i32, usize, usize) {
+    if n == 0 {
+        return (TAB_MAX_WIDTH, 0, 0);
+    }
+    let width = (avail / n as i32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+    let fit = ((avail / width).max(1) as usize).min(n);
+    let mut first = first.min(n - fit);
+    if active < first {
+        first = active;
+    } else if active >= first + fit {
+        first = active + 1 - fit;
+    }
+    (width, first, fit)
+}
+
 pub struct Ui {
     window: Window,
     strip: Panel,
+    /// "▾ N": tabs that don't fit, as a menu.
+    overflow: LabelButton,
+    /// First tab shown in the strip when not all fit.
+    first_tab: usize,
     back: LabelButton,
     forward: LabelButton,
     address: Textfield,
     shield: LabelButton,
+    /// "125%": shown when the page isn't at 100%; clicking resets.
+    zoom: LabelButton,
     downloads: LabelButton,
     update: LabelButton,
     /// Vertical layout of the window: tab strip, nav bar, then one browser view per tab (only the active one visible).
@@ -283,6 +427,34 @@ pub struct Ui {
     find_count: LabelButton,
     /// Text of the current search, to tell a new search from cursor moves.
     find_text: String,
+    /// ☆ / ★: bookmark the current page.
+    star: LabelButton,
+    /// 📖: open or leave reader view (shown on pages that look like articles).
+    reader: LabelButton,
+    /// 🔑: fill a saved login (shown on sites with saved logins).
+    key: LabelButton,
+    /// Usernames behind the open 🔑 menu (command LOGIN_MENU_BASE + index).
+    menu_logins: Vec<String>,
+    /// "Save password for … ?" bar, and the login it is about.
+    save_bar: Panel,
+    save_text: LabelButton,
+    pending_login: Option<PendingLogin>,
+    /// The bookmarks bar, its link addresses and folder buttons/contents.
+    bookmark_bar: Panel,
+    bar_urls: Vec<String>,
+    bar_folders: Vec<(LabelButton, Vec<bookmarks::Bookmark>)>,
+    /// Every bar entry in order, the "»" button, and the first entry that didn't fit.
+    bar_entries: Vec<(LabelButton, bookmarks::BarItem)>,
+    bar_more: LabelButton,
+    bar_hidden_from: usize,
+    /// Addresses behind the open folder menu (command BOOKMARK_MENU_BASE + index).
+    menu_urls: Vec<String>,
+    /// Address-bar suggestions: a floating panel of rows, their targets, the highlighted one.
+    suggest_overlay: Option<OverlayController>,
+    suggest_rows: Vec<LabelButton>,
+    suggestions: Vec<String>,
+    suggest_index: Option<usize>,
+    last_typed: String,
 }
 
 /// A button that only shows text.
@@ -326,9 +498,17 @@ impl Ui {
             window.set_window_app_icon(Some(&mut icon));
         }
         let panel = Panel::from(window);
-        let column = panel.set_to_box_layout(Some(&BoxLayoutSettings { horizontal: 0, ..Default::default() }));
+        let column = panel.set_to_box_layout(Some(&BoxLayoutSettings {
+            horizontal: 0,
+            // Every row (tab strip, toolbar, bars) spans the full width.
+            cross_axis_alignment: AxisAlignment::STRETCH,
+            ..Default::default()
+        }));
 
         let (strip, _) = row(2);
+        let overflow = button("▾", Action::TabMenu, "All tabs");
+        View::from(&overflow).set_visible(0);
+        add(&strip, &overflow);
         add(&strip, &button("+", Action::NewTab, "New tab (Ctrl+T)"));
 
         let (nav, nav_layout) = row(4);
@@ -336,7 +516,14 @@ impl Ui {
         let forward = button("→", Action::Forward, "Forward (Alt+Right)");
         let reload = button("↻", Action::Reload, "Reload (F5)");
         let address = textfield_create(Some(&mut Address::new())).expect("textfield");
+        let star = button("☆", Action::ToggleBookmark, "Bookmark this page (Ctrl+D)");
+        let reader = button("📖", Action::Reader, "Reader view (F9)");
+        View::from(&reader).set_visible(0);
+        let key = button("🔑", Action::Logins, "Fill a saved password");
+        View::from(&key).set_visible(0);
         address.set_placeholder_text(Some(&CefString::from("Search or enter address")));
+        let zoom = button("100%", Action::ZoomReset, "Reset zoom (Ctrl+0)");
+        View::from(&zoom).set_visible(0);
         let shield = button("", Action::Shield, "");
         let update = button("Update ready", Action::UpdateRestart, "Restart Bare to install the update");
         let downloads = button("↓", Action::Downloads, "Downloads (Ctrl+J)");
@@ -347,6 +534,10 @@ impl Ui {
             View::from(&forward),
             View::from(&reload),
             View::from(&address),
+            View::from(&key),
+            View::from(&reader),
+            View::from(&star),
+            View::from(&zoom),
             View::from(&shield),
             View::from(&update),
             View::from(&downloads),
@@ -372,6 +563,21 @@ impl Ui {
         View::from(&prompt_bar).set_background_color(0x402563EB); // translucent accent, both themes
         View::from(&prompt_bar).set_visible(0);
 
+        // Save-password bar: "Save password for me@example.com on example.com?" [Save] [Never] [Not now]
+        let (save_bar, save_layout) = row(8);
+        let save_text = label("");
+        add(&save_bar, &save_text);
+        add(&save_bar, &button("Save", Action::SaveLogin, "Save in Bare's password vault (encrypted for your Windows account)"));
+        add(&save_bar, &button("Never for this site", Action::NeverSaveLogin, "Don't offer to save passwords on this site"));
+        add(&save_bar, &button("Not now", Action::DismissLogin, ""));
+        if let Some(l) = save_layout {
+            l.set_flex_for_view(Some(&mut View::from(&save_text)), 1);
+        }
+        View::from(&save_text).set_background_color(0);
+        save_text.set_horizontal_alignment(HorizontalAlignment::LEFT);
+        View::from(&save_bar).set_background_color(0x402563EB);
+        View::from(&save_bar).set_visible(0);
+
         // Find bar: [search field][3 of 12][↑][↓][✕]
         let (find_bar, find_layout) = row(4);
         let find_field = textfield_create(Some(&mut FindField::new())).expect("textfield");
@@ -393,20 +599,53 @@ impl Ui {
 
         add(&panel, &strip);
         add(&panel, &nav);
+        // Bookmarks bar (filled by rebuild_bookmarks_bar).
+        let (bookmark_bar, _) = row(2);
+        add(&panel, &bookmark_bar);
         add(&panel, &prompt_bar);
+        add(&panel, &save_bar);
         add(&panel, &find_bar);
 
         for (i, &(_, key, shift, ctrl, alt)) in SHORTCUTS.iter().enumerate() {
             window.set_accelerator(SHORTCUT_BASE + i as c_int, key, shift as _, ctrl as _, alt as _, 1);
         }
 
+        // Address-bar suggestions: a column of rows floating over the page, under the address bar.
+        let suggest_panel = panel_create(None).expect("panel");
+        suggest_panel.set_to_box_layout(Some(&BoxLayoutSettings {
+            horizontal: 0,
+            inside_border_vertical_spacing: 4,
+            inside_border_horizontal_spacing: 4,
+            cross_axis_alignment: AxisAlignment::STRETCH,
+            ..Default::default()
+        }));
+        let suggest_rows: Vec<LabelButton> = (0..MAX_SUGGESTIONS)
+            .map(|i| {
+                let b = button("", Action::PickSuggestion(i), "");
+                b.set_horizontal_alignment(HorizontalAlignment::LEFT);
+                add(&suggest_panel, &b);
+                b
+            })
+            .collect();
+        View::from(&suggest_panel).set_background_color(suggest_background());
+        for row in &suggest_rows {
+            View::from(row).set_background_color(suggest_background());
+        }
+        let suggest_overlay = window.add_overlay_view(Some(&mut View::from(&suggest_panel)), DockingMode::CUSTOM, 0);
+        if let Some(o) = &suggest_overlay {
+            o.set_visible(0);
+        }
+
         Ui {
             window: window.clone(),
             strip,
+            overflow,
+            first_tab: 0,
             back,
             forward,
             address,
             shield,
+            zoom,
             downloads,
             update,
             column: column.expect("box layout"),
@@ -423,11 +662,35 @@ impl Ui {
             find_field,
             find_count,
             find_text: String::new(),
+            star,
+            reader,
+            key,
+            menu_logins: Vec::new(),
+            save_bar,
+            save_text,
+            pending_login: None,
+            bookmark_bar,
+            bar_urls: Vec::new(),
+            bar_folders: Vec::new(),
+            bar_entries: Vec::new(),
+            bar_more: button("»", Action::BookmarksMore, "More bookmarks"),
+            bar_hidden_from: usize::MAX,
+            menu_urls: Vec::new(),
+            suggest_overlay,
+            suggest_rows,
+            suggestions: Vec::new(),
+            suggest_index: None,
+            last_typed: String::new(),
         }
     }
 
     pub fn open(&mut self, target: &str) {
         let target = if target.is_empty() { url::BLANK } else { target };
+        self.open_tab(target, target == url::BLANK);
+    }
+
+    /// Opens `target` in a new tab, focusing the address bar (ready to type) or the page.
+    fn open_tab(&mut self, target: &str, focus_address: bool) {
         let id = self.next_id;
         self.next_id += 1;
         let mut client = self.client.clone();
@@ -449,7 +712,8 @@ impl Ui {
 
         let label = button("New tab", Action::Select(id), "");
         let close = button("✕", Action::Close(id), "Close tab (Ctrl+W)");
-        let at = self.strip.child_view_count() as c_int - 1; // before the "+" button
+        // Tab k's label and ✕ sit at strip positions 2k and 2k+1, before "▾" and "+".
+        let at = 2 * self.tabs.len() as c_int;
         self.strip.add_child_view_at(Some(&mut View::from(&label)), at);
         self.strip.add_child_view_at(Some(&mut View::from(&close)), at + 1);
 
@@ -470,11 +734,18 @@ impl Ui {
             close,
             page: None,
             prompts: VecDeque::new(),
+            pid: None,
+            memory: None,
+            recorded: String::new(),
+            readerable: false,
+            reader: None,
+            in_reader: false,
+            reader_pending: None,
         });
         self.active = self.tabs.len() - 1;
         Panel::from(&self.window).layout();
         self.refresh();
-        if target == url::BLANK { self.focus_address() } else { self.focus_page() }
+        if focus_address { self.focus_address() } else { self.focus_page() }
     }
 
     fn index_of(&self, id: u64) -> Option<usize> {
@@ -516,6 +787,9 @@ impl Ui {
         // Bare thinking the window is closing, or this tab close would close the window.
         CLOSING.set(false);
         let mut tab = self.tabs.remove(index);
+        if self.pending_login.as_ref().is_some_and(|p| p.tab == tab.id) {
+            self.pending_login = None;
+        }
         for request in tab.prompts.drain(..) {
             request.answer(false);
         }
@@ -544,7 +818,7 @@ impl Ui {
         let n = self.tabs.len();
         let browser = self.tabs.get(self.active).and_then(|t| t.browser.clone());
         match action {
-            Action::NewTab => self.open(url::BLANK),
+            Action::NewTab => self.open_new_tab(),
             Action::CloseActive => self.close(self.active),
             Action::NextTab if n > 0 => self.select((self.active + 1) % n),
             Action::PrevTab if n > 0 => self.select((self.active + n - 1) % n),
@@ -563,6 +837,19 @@ impl Ui {
                 }
             }
             Action::Shield => self.toggle_shield(),
+            Action::Reader => self.toggle_reader(),
+            Action::Logins => self.show_logins(),
+            Action::SaveLogin | Action::NeverSaveLogin | Action::DismissLogin => {
+                if let Some(p) = self.pending_login.take() {
+                    match action {
+                        Action::SaveLogin => passwords::save(&p.origin, &p.username, &p.password),
+                        Action::NeverSaveLogin => passwords::set_never(&p.origin, true),
+                        _ => {}
+                    }
+                    self.refresh();
+                    self.refresh_pages(Page::Passwords);
+                }
+            }
             Action::Downloads => self.open_page(Page::Downloads),
             Action::Settings => self.open_page(Page::Settings),
             Action::UpdateRestart => {
@@ -571,6 +858,48 @@ impl Ui {
             }
             Action::PermissionAllow => self.answer_permission(true),
             Action::PermissionBlock => self.answer_permission(false),
+            Action::TabMenu => self.show_tab_menu(),
+            Action::HistoryPage => self.open_page(Page::History),
+            Action::BookmarksPage => self.open_page(Page::Bookmarks),
+            Action::ToggleBookmark => self.toggle_bookmark(),
+            Action::ToggleBookmarksBar => {
+                settings::update(|s| s.bookmarks_bar = !s.bookmarks_bar);
+                self.rebuild_bookmarks_bar();
+                self.refresh_pages(Page::Bookmarks);
+            }
+            Action::OpenBookmark(i) => {
+                if let Some(url) = self.bar_urls.get(i).cloned() {
+                    self.load_in_active(&url);
+                }
+            }
+            Action::BookmarkFolder(i) => self.show_folder_menu(i),
+            Action::BookmarksMore => self.show_bookmarks_more(),
+            Action::PickSuggestion(i) => {
+                if let Some(url) = self.suggestions.get(i).cloned() {
+                    self.load_in_active(&url);
+                }
+                self.hide_suggestions();
+            }
+            Action::SelectTab(i) => self.select(i),
+            Action::LastTab if n > 0 => self.select(n - 1),
+            Action::MoveTabLeft => self.move_tab(false),
+            Action::MoveTabRight => self.move_tab(true),
+            Action::PictureInPicture => {
+                if let Some(frame) = self.tabs.get(self.active).and_then(|t| t.browser.as_ref()).and_then(|b| b.main_frame()) {
+                    let script = handlers::pip_script(None);
+                    frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
+                }
+            }
+            Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => {
+                let Some(host) = self.active_host() else { return };
+                host.zoom(match action {
+                    Action::ZoomIn => ZoomCommand::IN,
+                    Action::ZoomOut => ZoomCommand::OUT,
+                    _ => ZoomCommand::RESET,
+                });
+                // The new level is applied asynchronously.
+                defer_after(150, |ui| ui.refresh());
+            }
             Action::Find => self.open_find(),
             Action::FindNext => self.find_step(true),
             Action::FindPrev => self.find_step(false),
@@ -593,6 +922,117 @@ impl Ui {
     }
 
     /// Turns the blocker off (or back on) for the current site, then reloads it. Remembered.
+    /// Opens reader view for the active tab, or leaves it (back to the original page).
+    fn toggle_reader(&mut self) {
+        let Some(t) = self.tabs.get_mut(self.active) else { return };
+        let Some(b) = t.browser.clone() else { return };
+        if t.in_reader {
+            if t.can_back {
+                b.go_back();
+            } else if let Some((_, source)) = &t.reader {
+                b.main_frame().map(|f| f.load_url(Some(&CefString::from(source.as_str()))));
+            }
+        } else if t.readerable && t.page.is_none() {
+            let token = pages::random_token();
+            if let Some(f) = b.main_frame() {
+                f.execute_java_script(Some(&CefString::from(reader::extract_script(&token).as_str())), None, 0);
+            }
+            t.reader_pending = Some(token);
+        }
+    }
+
+    /// A reader script reported back from a page.
+    pub fn on_reader_report(&mut self, browser_id: i32, report: reader::Report) {
+        let Some(t) = self.tab_for_browser(browser_id) else { return };
+        match report {
+            reader::Report::Readerable(yes) => t.readerable = yes && !t.in_reader,
+            // Only the article the user asked for, so a page can't open reader view by itself.
+            reader::Report::Article(token, article) if t.reader_pending.as_ref() == Some(&token) => {
+                t.reader_pending = None;
+                let Some(article) = article else {
+                    t.readerable = false; // Readability found nothing after all
+                    return self.refresh();
+                };
+                let page = reader::page_url(&article, &t.url);
+                if let Some(f) = t.browser.as_ref().and_then(|b| b.main_frame()) {
+                    f.load_url(Some(&CefString::from(page.as_str())));
+                }
+                t.reader = Some((page, t.url.clone()));
+            }
+            reader::Report::Article(..) => {}
+        }
+        self.refresh();
+    }
+
+    // ---- passwords ----
+
+    /// The active tab's site, if it's a web page that could have saved logins.
+    fn active_origin(&self) -> Option<String> {
+        self.tabs.get(self.active).filter(|t| t.page.is_none() && !t.in_reader).and_then(|t| passwords::origin(&t.url))
+    }
+
+    /// A page reported a submitted login: offer to save it.
+    pub fn on_login_submitted(&mut self, browser_id: i32, login: passwords::Submitted) {
+        if self.private || !settings::get().save_passwords {
+            return;
+        }
+        let Some(t) = self.tabs.iter().find(|t| t.browser_id() == Some(browser_id)) else { return };
+        // The page says which site it is; believe it only if that's where the tab really is.
+        if t.page.is_some() || passwords::origin(&t.url).as_deref() != Some(login.origin.as_str()) {
+            return;
+        }
+        if passwords::offer(&login.origin, &login.username, &login.password) == passwords::Offer::None {
+            return;
+        }
+        self.pending_login = Some(PendingLogin { tab: t.id, origin: login.origin, username: login.username, password: login.password });
+        self.refresh();
+    }
+
+    fn refresh_save_bar(&self) {
+        let active = self.tabs.get(self.active).map(|t| t.id);
+        let pending = self.pending_login.as_ref().filter(|p| Some(p.tab) == active);
+        View::from(&self.save_bar).set_visible(pending.is_some() as _);
+        if let Some(p) = pending {
+            let verb = match passwords::offer(&p.origin, &p.username, &p.password) {
+                passwords::Offer::Update => "Update",
+                _ => "Save",
+            };
+            let who = if p.username.is_empty() { String::new() } else { format!(" for {}", p.username) };
+            let text = format!("{verb} password{who} on {}?", passwords::site(&p.origin));
+            self.save_text.set_text(Some(&CefString::from(text.as_str())));
+        }
+    }
+
+    /// 🔑: fill the only saved login, or choose one from a menu.
+    fn show_logins(&mut self) {
+        let Some(origin) = self.active_origin() else { return };
+        self.menu_logins = passwords::usernames(&origin);
+        match self.menu_logins.len() {
+            0 => {}
+            1 => self.fill_login(0),
+            _ => {
+                let Some(mut menu) = menu_model_create(Some(&mut LoginMenu::new())) else { return };
+                for (i, name) in self.menu_logins.iter().enumerate() {
+                    let label = if name.is_empty() { "(no username)" } else { name.as_str() };
+                    menu.add_item(LOGIN_MENU_BASE + i as c_int, Some(&CefString::from(label.chars().take(80).collect::<String>().as_str())));
+                }
+                let b = View::from(&self.key).bounds_in_screen();
+                self.window.show_menu(Some(&mut menu), Some(&Point { x: b.x, y: b.y + b.height }), MenuAnchorPosition::TOPLEFT);
+            }
+        }
+    }
+
+    /// Fills the login picked from the 🔑 menu into the active page.
+    pub fn fill_login(&mut self, index: usize) {
+        let (Some(origin), Some(username)) = (self.active_origin(), self.menu_logins.get(index).cloned()) else { return };
+        let Some(password) = passwords::password(&origin, &username) else { return };
+        let frame = self.tabs.get(self.active).and_then(|t| t.browser.as_ref()).and_then(|b| b.main_frame());
+        if let Some(f) = frame {
+            f.execute_java_script(Some(&CefString::from(passwords::fill_script(&origin, &username, &password).as_str())), None, 0);
+        }
+        self.focus_page();
+    }
+
     fn toggle_shield(&mut self) {
         let Some(tab) = self.tabs.get(self.active) else { return };
         let Some(id) = tab.browser_id() else { return };
@@ -609,11 +1049,250 @@ impl Ui {
         self.refresh_pages(Page::Settings);
     }
 
+    /// A new tab: the search engine's home page (or blank), with the address bar ready to type in.
+    pub fn open_new_tab(&mut self) {
+        let url = settings::get().new_tab_url();
+        self.open_tab(url, true);
+    }
+
     /// Opens a launch target in a new tab: a web address, a file, or a bare:// page.
     pub fn open_target(&mut self, target: &str) {
+        if target == NEW_TAB {
+            return self.open_new_tab();
+        }
         match Page::from_address(target) {
             Some(page) => self.open_page(page),
             None => self.open(target),
+        }
+    }
+
+    // ---- address-bar suggestions ----
+
+    pub fn suggestions_visible(&self) -> bool {
+        self.suggest_overlay.as_ref().is_some_and(|o| o.is_visible() == 1)
+    }
+
+    pub fn hide_suggestions(&mut self) {
+        if let Some(o) = &self.suggest_overlay {
+            o.set_visible(0);
+        }
+        self.suggest_index = None;
+        self.last_typed.clear();
+    }
+
+    /// Rebuilds the suggestions from what's typed: what Enter would do, then matching
+    /// bookmarks (★) and history, best first.
+    pub fn update_suggestions(&mut self) {
+        let typed = CefString::from(&self.address.text()).to_string();
+        if typed == self.last_typed {
+            return; // cursor moved, nothing typed
+        }
+        if typed.trim().is_empty() || Page::from_address(&typed).is_some() {
+            return self.hide_suggestions();
+        }
+        self.last_typed = typed.clone();
+        let search = settings::get().search;
+        let target = url::resolve(&typed, search.prefix());
+        let first = if target.starts_with(search.prefix()) {
+            format!("🔍  {}  —  {} search", typed.trim(), search.name())
+        } else {
+            format!("→  {}", history::display_url(&target))
+        };
+        let mut rows: Vec<(String, String)> = vec![(target, first)];
+        for b in bookmarks::suggest(&typed, MAX_SUGGESTIONS) {
+            rows.push((b.url.clone(), format!("★  {}  —  {}", b.title, history::display_url(&b.url))));
+        }
+        if !self.private {
+            for e in history::suggest(&typed, MAX_SUGGESTIONS) {
+                let title = if e.title.is_empty() { history::display_url(&e.url).to_string() } else { e.title.clone() };
+                rows.push((e.url.clone(), format!("{title}  —  {}", history::display_url(&e.url))));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|(u, _)| seen.insert(u.trim_end_matches('/').to_string()));
+        rows.truncate(MAX_SUGGESTIONS);
+        self.suggestions = rows.iter().map(|(u, _)| u.clone()).collect();
+        self.suggest_index = None;
+        for (i, row) in self.suggest_rows.iter().enumerate() {
+            let label = rows.get(i).map_or("", |(_, l)| l.as_str());
+            let label: String = label.chars().take(120).collect();
+            row.set_text(Some(&CefString::from(label.as_str())));
+            View::from(row).set_visible((i < rows.len()) as _);
+            View::from(row).set_background_color(suggest_background());
+        }
+        self.place_suggestions(rows.len());
+    }
+
+    /// Positions the suggestions right under the address bar, as wide as it.
+    fn place_suggestions(&self, count: usize) {
+        let Some(o) = &self.suggest_overlay else { return };
+        // Overlay positions are relative to the window's client area.
+        let field = View::from(&self.address).bounds_in_screen();
+        let client = self.window.client_area_bounds_in_screen();
+        o.set_bounds(Some(&Rect {
+            x: field.x - client.x,
+            y: field.y - client.y + field.height + 2,
+            width: field.width,
+            height: count as c_int * 30 + 8,
+        }));
+        o.set_visible(1);
+    }
+
+    pub fn move_suggestion(&mut self, down: bool) {
+        if !self.suggestions_visible() || self.suggestions.is_empty() {
+            return;
+        }
+        let n = self.suggestions.len();
+        let next = match (self.suggest_index, down) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(i), true) => (i + 1) % n,
+            (Some(i), false) => (i + n - 1) % n,
+        };
+        self.suggest_index = Some(next);
+        for (i, row) in self.suggest_rows.iter().enumerate() {
+            View::from(row).set_background_color(if i == next { suggest_highlight() } else { suggest_background() });
+        }
+    }
+
+    /// Enter in the address bar: the highlighted suggestion if any, else what's typed.
+    pub fn enter_address(&mut self, input: &str) {
+        match self.suggest_index.and_then(|i| self.suggestions.get(i).cloned()) {
+            Some(url) => self.load_in_active(&url),
+            None => self.navigate(input),
+        }
+        self.hide_suggestions();
+    }
+
+    fn load_in_active(&mut self, target: &str) {
+        if let Some(page) = Page::from_address(target) {
+            return self.open_page(page);
+        }
+        if let Some(frame) = self.tabs.get(self.active).and_then(|t| t.browser.as_ref()).and_then(|b| b.main_frame()) {
+            frame.load_url(Some(&CefString::from(target)));
+        }
+        self.focus_page();
+    }
+
+    // ---- bookmarks ----
+
+    /// Refills the bookmarks bar: loose bookmarks as buttons, folders as menus.
+    fn rebuild_bookmarks_bar(&mut self) {
+        self.bookmark_bar.remove_all_child_views();
+        self.bar_urls.clear();
+        self.bar_folders.clear();
+        self.bar_entries.clear();
+        let items = bookmarks::bar_items();
+        for item in &items {
+            match item {
+                bookmarks::BarItem::Link(b) => {
+                    let title = if b.title.is_empty() { history::display_url(&b.url) } else { &b.title };
+                    let label: String = title.chars().take(24).collect();
+                    let button = button(&label, Action::OpenBookmark(self.bar_urls.len()), &b.url);
+                    add(&self.bookmark_bar, &button);
+                    self.bar_urls.push(b.url.clone());
+                    self.bar_entries.push((button, item.clone()));
+                }
+                bookmarks::BarItem::Folder(name, list) => {
+                    let label: String = name.chars().take(24).collect();
+                    let button = button(&format!("{label} ▾"), Action::BookmarkFolder(self.bar_folders.len()), name);
+                    add(&self.bookmark_bar, &button);
+                    self.bar_folders.push((button.clone(), list.clone()));
+                    self.bar_entries.push((button, item.clone()));
+                }
+            }
+        }
+        add(&self.bookmark_bar, &self.bar_more);
+        let show = settings::get().bookmarks_bar && !items.is_empty();
+        View::from(&self.bookmark_bar).set_visible(show as _);
+        self.fit_bookmarks_bar();
+    }
+
+    /// Shows as many bar entries as fit the window; the rest go behind "»".
+    fn fit_bookmarks_bar(&mut self) {
+        let avail = View::from(&Panel::from(&self.window)).bounds().width;
+        let avail = if avail > 0 { avail } else { 1280 } - 60; // room for "»" and padding
+        let mut used = 0;
+        self.bar_hidden_from = usize::MAX;
+        for (i, (button, _)) in self.bar_entries.iter().enumerate() {
+            let view = View::from(button);
+            used += view.preferred_size().width + 2;
+            let fits = used <= avail && self.bar_hidden_from == usize::MAX;
+            if !fits && self.bar_hidden_from == usize::MAX {
+                self.bar_hidden_from = i;
+            }
+            view.set_visible(fits as _);
+        }
+        View::from(&self.bar_more).set_visible((self.bar_hidden_from != usize::MAX) as _);
+        Panel::from(&self.window).layout();
+    }
+
+    /// The "»" menu: bar entries that didn't fit, folders as sub-menus.
+    fn show_bookmarks_more(&mut self) {
+        let Some(menu) = menu_model_create(Some(&mut BookmarkMenu::new())) else { return };
+        self.menu_urls.clear();
+        let hidden: Vec<bookmarks::BarItem> = self.bar_entries.iter().skip(self.bar_hidden_from).map(|(_, item)| item.clone()).collect();
+        let add_link = |menu: &MenuModel, urls: &mut Vec<String>, b: &bookmarks::Bookmark| {
+            let title = if b.title.is_empty() { history::display_url(&b.url).to_string() } else { b.title.clone() };
+            menu.add_item(BOOKMARK_MENU_BASE + urls.len() as c_int, Some(&CefString::from(title.chars().take(80).collect::<String>().as_str())));
+            urls.push(b.url.clone());
+        };
+        let mut urls = Vec::new();
+        for (i, item) in hidden.iter().enumerate() {
+            match item {
+                bookmarks::BarItem::Link(b) => add_link(&menu, &mut urls, b),
+                bookmarks::BarItem::Folder(name, list) => {
+                    if let Some(sub) = menu.add_sub_menu(BOOKMARK_SUBMENU_BASE + i as c_int, Some(&CefString::from(name.as_str()))) {
+                        for b in list {
+                            add_link(&sub, &mut urls, b);
+                        }
+                    }
+                }
+            }
+        }
+        self.menu_urls = urls;
+        let b = View::from(&self.bar_more).bounds_in_screen();
+        let mut menu = menu;
+        self.window.show_menu(Some(&mut menu), Some(&Point { x: b.x, y: b.y + b.height }), MenuAnchorPosition::TOPRIGHT);
+    }
+
+    fn toggle_bookmark(&mut self) {
+        let Some(t) = self.tabs.get(self.active) else { return };
+        if t.page.is_some() || !history::recordable(&t.url) {
+            return;
+        }
+        if bookmarks::is_bookmarked(&t.url) {
+            bookmarks::remove(&t.url);
+        } else {
+            bookmarks::add(&t.title, &t.url);
+        }
+        self.rebuild_bookmarks_bar();
+        self.refresh_pages(Page::Bookmarks);
+        self.refresh();
+    }
+
+    fn show_folder_menu(&mut self, index: usize) {
+        let Some((button, list)) = self.bar_folders.get(index) else { return };
+        let Some(menu) = menu_model_create(Some(&mut BookmarkMenu::new())) else { return };
+        self.menu_urls = list.iter().map(|b| b.url.clone()).collect();
+        for (i, b) in list.iter().enumerate() {
+            // Sub-folders show their path, e.g. "Docs › Page".
+            let sub = b.folder.split_once('/').map(|(_, rest)| rest.replace('/', " › "));
+            let title = if b.title.is_empty() { history::display_url(&b.url).to_string() } else { b.title.clone() };
+            let label = match sub {
+                Some(path) => format!("{path} › {title}"),
+                None => title,
+            };
+            menu.add_item(BOOKMARK_MENU_BASE + i as c_int, Some(&CefString::from(label.chars().take(80).collect::<String>().as_str())));
+        }
+        let b = View::from(button).bounds_in_screen();
+        let mut menu = menu;
+        self.window.show_menu(Some(&mut menu), Some(&Point { x: b.x, y: b.y + b.height }), MenuAnchorPosition::TOPLEFT);
+    }
+
+    pub fn open_menu_url(&mut self, index: usize) {
+        if let Some(url) = self.menu_urls.get(index).cloned() {
+            self.load_in_active(&url);
         }
     }
 
@@ -687,6 +1366,7 @@ impl Ui {
                     "ask" => s.ask_download_location = on,
                     "autoUpdate" => s.auto_update = on,
                     "wipe" => s.wipe_on_start = on,
+                    "newTabHome" => s.new_tab_home = on,
                     _ => {}
                 });
                 if matches!(key, "social" | "cookies") {
@@ -736,6 +1416,32 @@ impl Ui {
                     (None, _) => pages::set_notice("That configuration URL isn\u{2019}t valid."),
                 }
             }
+            (Some(Page::History), "hist-delete") => history::delete(param("url")),
+            (Some(Page::History), "hist-clear") => history::clear(),
+            (Some(Page::History), "hist-search") => pages::set_history_query(param("q")),
+            (Some(Page::Bookmarks), "bm-delete") => {
+                bookmarks::remove(param("url"));
+                self.rebuild_bookmarks_bar();
+            }
+            (Some(Page::Bookmarks), "bm-rename") => {
+                bookmarks::rename(param("url"), param("title"));
+                self.rebuild_bookmarks_bar();
+            }
+            (Some(Page::Bookmarks), "bm-import") => {
+                let from = param("from");
+                let name = bookmarks::import_sources().into_iter().find(|(id, ..)| *id == from).map_or("that browser", |(_, n, _)| n);
+                match bookmarks::import(from) {
+                    Ok(0) => pages::set_notice(&format!("Nothing new to import from {name}.")),
+                    Ok(n) => pages::set_notice(&format!("Imported {n} bookmark{} from {name}.", if n == 1 { "" } else { "s" })),
+                    Err(e) => pages::set_notice(&format!("Import failed: {e}")),
+                }
+                self.rebuild_bookmarks_bar();
+            }
+            (Some(Page::Bookmarks), "set") if param("key") == "bookmarksBar" => {
+                let on = param("value") == "true";
+                settings::update(|s| s.bookmarks_bar = on);
+                self.rebuild_bookmarks_bar();
+            }
             (Some(Page::Settings), "allow-remove") => {
                 let host = param("host").to_string();
                 settings::update(|s| {
@@ -746,6 +1452,24 @@ impl Ui {
             (Some(Page::Settings), "update-check") => update::check(),
             (Some(Page::Settings), "make-default") => crate::system::open_default_apps_settings(),
             (Some(Page::Settings), "update-restart") => self.act(Action::UpdateRestart),
+            (Some(Page::Settings), "open-passwords") => return self.open_page(Page::Passwords),
+            (Some(Page::Passwords), "pw-reveal") => {
+                // Only to the passwords page that asked, and only the one password.
+                let (origin, username) = (param("origin"), param("username"));
+                let Some(password) = passwords::password(origin, username) else { return };
+                let frame = self.tabs.iter().find(|t| t.browser_id() == Some(browser_id)).and_then(|t| t.browser.as_ref()).and_then(|b| b.main_frame());
+                if let Some(f) = frame {
+                    let script = format!("window.reveal&&reveal({},{},{})", crate::block::js_string(origin), crate::block::js_string(username), crate::block::js_string(&password));
+                    f.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
+                }
+                return;
+            }
+            (Some(Page::Passwords), "pw-delete") => passwords::remove(param("origin"), param("username")),
+            (Some(Page::Passwords), "pw-never-remove") => passwords::set_never(param("origin"), false),
+            (Some(Page::Passwords), "pw-offer") => {
+                let on = param("value") == "true";
+                settings::update(|s| s.save_passwords = on);
+            }
             _ => return,
         }
         if let Some(page) = page {
@@ -773,6 +1497,7 @@ impl Ui {
     }
 
     fn navigate(&mut self, input: &str) {
+        self.hide_suggestions();
         if let Some(page) = Page::from_address(input) {
             return self.open_page(page);
         }
@@ -799,8 +1524,100 @@ impl Ui {
         self.address.select_all(0);
     }
 
+    /// Sizes the tabs to fit the strip: they shrink as more open; when even the narrowest
+    /// don't fit, the rest go behind the "▾ N" menu button. The active tab is always shown.
+    fn layout_tabs(&mut self) {
+        // The window's width (the strip itself only spans its contents).
+        let strip_width = View::from(&Panel::from(&self.window)).bounds().width;
+        let strip_width = if strip_width > 0 { strip_width } else { 1280 };
+        // Room for the "+" and "▾ N" buttons and padding.
+        let avail = strip_width - 120;
+        let (width, first, fit) = tab_layout(self.tabs.len(), self.active, self.first_tab, avail);
+        self.first_tab = first;
+        for (i, t) in self.tabs.iter().enumerate() {
+            let visible = i >= first && i < first + fit;
+            let active = i == self.active;
+            let show_close = visible && (active || width >= TAB_CLOSE_MIN_WIDTH);
+            let label_width = width - if show_close { TAB_CLOSE_WIDTH } else { 0 };
+            let chars = ((label_width - 20) / TAB_CHAR_WIDTH).max(2) as usize;
+            t.button.set_text(Some(&CefString::from(t.label(chars).as_str())));
+            t.button.set_minimum_size(Some(&Size { width: label_width, height: 0 }));
+            t.button.set_maximum_size(Some(&Size { width: label_width, height: 100 }));
+            Button::from(&t.button).set_tooltip_text(Some(&CefString::from(self.tab_tooltip(t).as_str())));
+            View::from(&t.button).set_background_color(if active { ACTIVE_TAB } else { 0 });
+            View::from(&t.button).set_visible(visible as _);
+            View::from(&t.close).set_visible(show_close as _);
+        }
+        let hidden = self.tabs.len() - fit;
+        View::from(&self.overflow).set_visible((hidden > 0) as _);
+        self.overflow.set_text(Some(&CefString::from(format!("▾ {hidden}").as_str())));
+        self.strip.layout();
+    }
+
+    /// Title plus memory use, like Chrome's tab hover card.
+    fn tab_tooltip(&self, t: &Tab) -> String {
+        let mut tip = t.title_text().to_string();
+        if let (Some(bytes), Some(pid)) = (t.memory, t.pid) {
+            tip.push_str(&format!("
+Memory usage: {}", memory::format_bytes(bytes)));
+            let others = self.tabs.iter().filter(|o| o.id != t.id && o.pid == Some(pid)).count();
+            if others > 0 {
+                tip.push_str(&format!(" (shared with {others} other tab{})", if others == 1 { "" } else { "s" }));
+            }
+        }
+        tip
+    }
+
+    pub fn on_renderer_pid(&mut self, browser_id: i32, pid: u32) {
+        if let Some(t) = self.tab_for_browser(browser_id) {
+            t.pid = Some(pid);
+            t.memory = memory::private_bytes(pid);
+        }
+        self.layout_tabs();
+    }
+
+    /// Re-reads every tab's memory use (every few seconds).
+    fn sample_memory(&mut self) {
+        for t in &mut self.tabs {
+            t.memory = t.pid.and_then(memory::private_bytes);
+        }
+        self.layout_tabs();
+    }
+
+    /// The "▾ N" button: a menu listing every tab.
+    fn show_tab_menu(&self) {
+        let Some(menu) = menu_model_create(Some(&mut TabMenu::new())) else { return };
+        for (i, t) in self.tabs.iter().enumerate() {
+            let id = TAB_MENU_BASE + i as c_int;
+            menu.add_check_item(id, Some(&CefString::from(t.label(60).as_str())));
+            menu.set_checked(id, (i == self.active) as _);
+        }
+        let b = View::from(&self.overflow).bounds_in_screen();
+        let mut menu = menu;
+        self.window.show_menu(Some(&mut menu), Some(&Point { x: b.x, y: b.y + b.height }), MenuAnchorPosition::TOPLEFT);
+    }
+
+    /// Moves the active tab one place left or right (Ctrl+Shift+PageUp / PageDown).
+    fn move_tab(&mut self, right: bool) {
+        let i = self.active;
+        let j = if right { i + 1 } else { i.wrapping_sub(1) };
+        if j >= self.tabs.len() {
+            return;
+        }
+        self.tabs.swap(i, j);
+        self.active = j;
+        // Tab k's label and ✕ sit at strip positions 2k and 2k+1.
+        for (k, t) in self.tabs.iter().enumerate() {
+            self.strip.reorder_child_view(Some(&mut View::from(&t.button)), 2 * k as c_int);
+            self.strip.reorder_child_view(Some(&mut View::from(&t.close)), 2 * k as c_int + 1);
+        }
+        self.refresh();
+    }
+
     /// Redraws tab labels, the address bar, buttons and the shield from current state.
     pub fn refresh(&mut self) {
+        self.layout_tabs();
+        self.fit_bookmarks_bar();
         let Some(active) = self.tabs.get(self.active) else { return };
         let browser_id = active.browser_id().unwrap_or(-1);
         let (host, blocked) = {
@@ -812,12 +1629,6 @@ impl Ui {
             let s = settings::get();
             (s.blocking, s.allowed_sites.contains(&host))
         };
-
-        for (i, t) in self.tabs.iter().enumerate() {
-            t.button.set_text(Some(&CefString::from(t.label().as_str())));
-            Button::from(&t.button).set_tooltip_text(Some(&CefString::from(t.title.as_str())));
-            View::from(&t.button).set_background_color(if i == self.active { ACTIVE_TAB } else { 0 });
-        }
 
         if View::from(&self.address).has_focus() != 1 {
             self.address.set_text(Some(&CefString::from(active.url.as_str())));
@@ -850,8 +1661,31 @@ impl Ui {
         self.downloads.set_text(Some(&CefString::from(label.as_str())));
         View::from(&self.update).set_visible(matches!(update::status(), update::Status::Ready { .. }) as _);
 
+        // 📖 on pages that look like articles, and in reader view (to leave it).
+        let (readerable, in_reader) = self.tabs.get(self.active).map_or((false, false), |t| (t.readerable && t.page.is_none(), t.in_reader));
+        View::from(&self.reader).set_visible((readerable || in_reader) as _);
+        self.reader.set_text(Some(&CefString::from(if in_reader { "📖 Leave reader" } else { "📖" })));
+        Button::from(&self.reader).set_tooltip_text(Some(&CefString::from(if in_reader { "Back to the original page (F9)" } else { "Reader view (F9)" })));
+
+        // 🔑 on sites with saved logins.
+        let has_logins = self.active_origin().is_some_and(|o| passwords::has_logins(&o));
+        View::from(&self.key).set_visible(has_logins as _);
+
+        // ☆ / ★ for web pages only.
+        let (can_bookmark, bookmarked) = match self.tabs.get(self.active) {
+            Some(t) if t.page.is_none() && history::recordable(&t.url) => (true, bookmarks::is_bookmarked(&t.url)),
+            _ => (false, false),
+        };
+        View::from(&self.star).set_visible(can_bookmark as _);
+        self.star.set_text(Some(&CefString::from(if bookmarked { "★" } else { "☆" })));
+        Button::from(&self.star).set_tooltip_text(Some(&CefString::from(if bookmarked { "Remove bookmark (Ctrl+D)" } else { "Bookmark this page (Ctrl+D)" })));
+
+        let percent = self.active_host().map_or(100, |h| zoom_percent(h.zoom_level()));
+        View::from(&self.zoom).set_visible((percent != 100) as _);
+        self.zoom.set_text(Some(&CefString::from(format!("{percent}%").as_str())));
+
         let mode = if self.private { " (Private)" } else { "" };
-        let title = format!("{} - Bare{mode}", active.label().trim_start_matches("• "));
+        let title = format!("{} - Bare{mode}", active.title_text().chars().take(80).collect::<String>());
         self.window.set_title(Some(&CefString::from(title.as_str())));
         self.refresh_prompt_bar();
     }
@@ -869,13 +1703,18 @@ impl Ui {
     }
 
     pub fn on_title(&mut self, browser_id: i32, title: String) {
+        let private = self.private;
         if let Some(t) = self.tab_for_browser(browser_id) {
+            if !private && t.page.is_none() {
+                history::set_title(&t.url, &title);
+            }
             t.title = title;
         }
         self.refresh();
     }
 
     pub fn on_url(&mut self, browser_id: i32, url: String) {
+        let private = self.private;
         if let Some(t) = self.tab_for_browser(browser_id) {
             // Requests from a site the tab has left are no longer relevant.
             let host = |u: &str| url::host(&u.to_ascii_lowercase()).map(String::from);
@@ -884,12 +1723,30 @@ impl Ui {
                     request.answer(false);
                 }
             }
+            // A different page (not just a new #fragment) needs checking for an article again.
+            let page_of = |u: &str| u.split('#').next().unwrap_or("").to_string();
+            if page_of(&t.url) != page_of(&url) {
+                t.readerable = false;
+            }
+            // The reader page shows the address of the page it came from, and isn't a visit.
+            t.in_reader = t.reader.as_ref().is_some_and(|(page, _)| *page == url);
+            if t.in_reader {
+                t.page = None;
+                t.url = t.reader.as_ref().map(|(_, source)| source.clone()).unwrap_or_default();
+                return self.refresh();
+            }
             match t.page {
                 // Built-in pages show their bare:// address, not the data: URL.
                 Some(page) if pages::is_page_url(&url) => t.url = page.display_url(),
                 _ => {
                     t.page = None;
-                    t.url = if url == url::BLANK || pages::is_page_url(&url) { String::new() } else { url };
+                    let new = if url == url::BLANK || pages::is_page_url(&url) { String::new() } else { url };
+                    // A visit (not private, and not just the same address reported again).
+                    if !private && new != t.recorded && history::recordable(&new) {
+                        history::record_visit(&new, &t.title);
+                        t.recorded = new.clone();
+                    }
+                    t.url = new;
                 }
             }
         }
@@ -959,6 +1816,7 @@ impl Ui {
 
     /// Shows the active tab's oldest pending request, if any.
     fn refresh_prompt_bar(&self) {
+        self.refresh_save_bar();
         let message = self.tabs.get(self.active).and_then(|t| t.prompts.front()).map(PermissionRequest::message);
         View::from(&self.prompt_bar).set_visible(message.is_some() as _);
         if let Some(m) = message {
@@ -1056,7 +1914,13 @@ wrap_button_delegate! {
 wrap_textfield_delegate! {
     struct Address {}
 
-    impl ViewDelegate {}
+    impl ViewDelegate {
+        /// Close the suggestions when focus leaves the address bar (after a moment, so a
+        /// click on a suggestion still lands).
+        fn on_blur(&self, _view: Option<&mut View>) {
+            defer_after(200, |ui| ui.hide_suggestions());
+        }
+    }
 
     impl TextfieldDelegate {
         fn on_key_event(&self, textfield: Option<&mut Textfield>, event: Option<&KeyEvent>) -> c_int {
@@ -1066,14 +1930,24 @@ wrap_textfield_delegate! {
             }
             match e.windows_key_code {
                 0x0D => {
-                    // Enter
+                    // Enter: the highlighted suggestion, or what's typed
                     let input = CefString::from(&field.text()).to_string();
-                    with_ui(move |ui| ui.navigate(&input));
+                    with_ui(move |ui| ui.enter_address(&input));
+                    1
+                }
+                0x26 | 0x28 => {
+                    // Up / Down: move through the suggestions
+                    let down = e.windows_key_code == 0x28;
+                    with_ui(move |ui| ui.move_suggestion(down));
                     1
                 }
                 0x1B => {
-                    // Escape: restore the page's URL
+                    // Escape: close the suggestions, or restore the page's address
                     with_ui(|ui| {
+                        if ui.suggestions_visible() {
+                            ui.hide_suggestions();
+                            return;
+                        }
                         if let Some(t) = ui.tabs.get(ui.active) {
                             ui.address.set_text(Some(&CefString::from(t.url.as_str())));
                         }
@@ -1082,6 +1956,57 @@ wrap_textfield_delegate! {
                     1
                 }
                 _ => 0,
+            }
+        }
+
+        /// Suggest as you type.
+        fn on_after_user_action(&self, _textfield: Option<&mut Textfield>) {
+            with_ui(|ui| ui.update_suggestions());
+        }
+    }
+}
+
+/// Menu command ids for a bookmarks-bar folder are BOOKMARK_MENU_BASE + index into `menu_urls`.
+const BOOKMARK_MENU_BASE: c_int = 5000;
+/// Menu command ids for the 🔑 menu are LOGIN_MENU_BASE + index into `menu_logins`.
+const LOGIN_MENU_BASE: c_int = 7000;
+/// Sub-menu ids (folders inside the "»" menu).
+const BOOKMARK_SUBMENU_BASE: c_int = 9000;
+
+wrap_menu_model_delegate! {
+    struct BookmarkMenu {}
+
+    impl MenuModelDelegate {
+        fn execute_command(&self, _menu_model: Option<&mut MenuModel>, command_id: c_int, _event_flags: EventFlags) {
+            if let Ok(index) = usize::try_from(command_id - BOOKMARK_MENU_BASE) {
+                defer(move |ui| ui.open_menu_url(index));
+            }
+        }
+    }
+}
+
+/// Menu command ids for the "▾ N" tab list are TAB_MENU_BASE + tab index.
+const TAB_MENU_BASE: c_int = 3000;
+
+wrap_menu_model_delegate! {
+    struct LoginMenu {}
+
+    impl MenuModelDelegate {
+        fn execute_command(&self, _menu_model: Option<&mut MenuModel>, command_id: c_int, _event_flags: EventFlags) {
+            if let Ok(index) = usize::try_from(command_id - LOGIN_MENU_BASE) {
+                defer(move |ui| ui.fill_login(index));
+            }
+        }
+    }
+}
+
+wrap_menu_model_delegate! {
+    struct TabMenu {}
+
+    impl MenuModelDelegate {
+        fn execute_command(&self, _menu_model: Option<&mut MenuModel>, command_id: c_int, _event_flags: EventFlags) {
+            if let Ok(index) = usize::try_from(command_id - TAB_MENU_BASE) {
+                defer(move |ui| ui.select(index));
             }
         }
     }
@@ -1136,6 +2061,17 @@ wrap_browser_view_delegate! {
         fn browser_runtime_style(&self) -> RuntimeStyle {
             RuntimeStyle::ALLOY
         }
+
+        /// Lets Bare's own "Picture in picture" command (Alt+P, right-click menu) start PiP;
+        /// pages still need a click to do it themselves.
+        fn allow_picture_in_picture_without_user_activation(&self, _browser_view: Option<&mut BrowserView>) -> c_int {
+            1
+        }
+
+        /// The bindings default to a PiP window that can't be dragged around.
+        fn allow_move_for_picture_in_picture(&self, _browser_view: Option<&mut BrowserView>) -> c_int {
+            1
+        }
     }
 }
 
@@ -1161,10 +2097,12 @@ wrap_window_delegate! {
             let ui = Ui::create(window, self.client.clone(), self.context.clone(), self.private);
             UI.with(|cell| *cell.borrow_mut() = Some(ui));
             let start = self.start.clone();
+            with_ui(|ui| ui.rebuild_bookmarks_bar());
             with_ui(move |ui| ui.open_target(&start));
             window.show();
             // Check for updates shortly after startup (at most once a day, if enabled).
             post_delayed_task(ThreadId::UI, Some(&mut UpdateTimer::new()), 15_000);
+            post_delayed_task(ThreadId::UI, Some(&mut MemoryTimer::new()), MEMORY_SAMPLE_MS);
         }
 
         fn on_window_destroyed(&self, _window: Option<&mut Window>) {
@@ -1207,6 +2145,11 @@ wrap_window_delegate! {
             RuntimeStyle::ALLOY
         }
 
+        /// Re-fit the tab strip when the window is resized.
+        fn on_window_bounds_changed(&self, _window: Option<&mut Window>, _new_bounds: Option<&Rect>) {
+            defer(|ui| ui.refresh());
+        }
+
         fn can_resize(&self, _window: Option<&mut Window>) -> c_int {
             1
         }
@@ -1241,6 +2184,34 @@ fn find_label(count: c_int, active: c_int) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_strip_layout() {
+        // Few tabs: full width, all visible.
+        assert_eq!(tab_layout(3, 0, 0, 1000), (TAB_MAX_WIDTH, 0, 3));
+        // Many tabs shrink, but not below the minimum.
+        let (w, first, fit) = tab_layout(10, 9, 0, 1000);
+        assert_eq!((w, fit), (100, 10));
+        assert_eq!(first, 0);
+        // Too many: the visible window slides so the active tab is shown.
+        let (w, first, fit) = tab_layout(40, 35, 0, 1000);
+        assert_eq!(w, TAB_MIN_WIDTH);
+        assert_eq!(fit, (1000 / TAB_MIN_WIDTH) as usize);
+        assert!(first <= 35 && 35 < first + fit);
+        // Going back to an earlier tab scrolls back.
+        let (_, first2, _) = tab_layout(40, 2, first, 1000);
+        assert!(first2 <= 2);
+        assert_eq!(tab_layout(0, 0, 0, 1000).2, 0);
+    }
+
+    #[test]
+    fn zoom_levels() {
+        assert_eq!(zoom_percent(0.0), 100);
+        assert_eq!(zoom_percent(1.0), 120);
+        assert_eq!(zoom_percent(-1.0), 83);
+        // Chromium's preset 125% is stored as log(1.25)/log(1.2).
+        assert_eq!(zoom_percent(1.25f64.ln() / 1.2f64.ln()), 125);
+    }
 
     #[test]
     fn find_counter() {

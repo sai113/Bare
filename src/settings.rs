@@ -39,6 +39,17 @@ impl Search {
         }
     }
 
+    /// The engine's home page, used as the new-tab page.
+    pub fn home(self) -> &'static str {
+        match self {
+            Search::DuckDuckGo => "https://duckduckgo.com/",
+            Search::Brave => "https://search.brave.com/",
+            Search::Startpage => "https://www.startpage.com/",
+            Search::Google => "https://www.google.com/",
+            Search::Bing => "https://www.bing.com/",
+        }
+    }
+
     /// URL prefix the URL-encoded query is appended to.
     pub fn prefix(self) -> &'static str {
         match self {
@@ -74,6 +85,12 @@ pub struct Settings {
     pub auto_update: bool,
     /// Delete all cookies, cache and site data the next time Bare starts.
     pub wipe_on_start: bool,
+    /// Show the bookmarks bar (when there are bookmarks).
+    pub bookmarks_bar: bool,
+    /// New tabs open the search engine's home page (otherwise a blank page).
+    pub new_tab_home: bool,
+    /// Offer to save passwords when logging in to sites.
+    pub save_passwords: bool,
     /// Secure DNS (DNS over HTTPS).
     pub dns: crate::network::Dns,
     /// Proxy server.
@@ -92,6 +109,9 @@ impl Default for Settings {
             ask_download_location: false,
             auto_update: true,
             wipe_on_start: false,
+            bookmarks_bar: true,
+            new_tab_home: true,
+            save_passwords: true,
             dns: crate::network::Dns::Automatic,
             proxy: crate::network::Proxy::System,
         }
@@ -114,6 +134,9 @@ impl Settings {
                 "ask_download_location" => s.ask_download_location = on,
                 "auto_update" => s.auto_update = on,
                 "wipe_on_start" => s.wipe_on_start = on,
+                "bookmarks_bar" => s.bookmarks_bar = on,
+                "new_tab_home" => s.new_tab_home = on,
+                "save_passwords" => s.save_passwords = on,
                 "dns" => s.dns = crate::network::Dns::parse(value),
                 "proxy" => proxy_mode = value.trim().to_string(),
                 "proxy_bypass" => proxy_bypass = value.trim().to_string(),
@@ -133,7 +156,7 @@ impl Settings {
         // One value per line: never let user-entered text add lines.
         let line = |s: &str| s.replace(['\r', '\n'], " ");
         format!(
-            "search={}\nblocking={}\ncosmetic={}\nblock_social={}\nhide_cookie_banners={}\nallowed_sites={}\nask_download_location={}\nauto_update={}\nwipe_on_start={}\ndns={}\nproxy={}\nproxy_bypass={}\n",
+            "search={}\nblocking={}\ncosmetic={}\nblock_social={}\nhide_cookie_banners={}\nallowed_sites={}\nask_download_location={}\nauto_update={}\nwipe_on_start={}\nbookmarks_bar={}\nnew_tab_home={}\nsave_passwords={}\ndns={}\nproxy={}\nproxy_bypass={}\n",
             self.search.id(),
             self.blocking,
             self.cosmetic,
@@ -143,10 +166,18 @@ impl Settings {
             self.ask_download_location,
             self.auto_update,
             self.wipe_on_start,
+            self.bookmarks_bar,
+            self.new_tab_home,
+            self.save_passwords,
             line(&self.dns.serialize()),
             line(&proxy),
             line(&bypass),
         )
+    }
+
+    /// What a new tab shows.
+    pub fn new_tab_url(&self) -> &'static str {
+        if self.new_tab_home { self.search.home() } else { crate::url::BLANK }
     }
 
     /// Optional filter lists to load.
@@ -200,7 +231,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let mut s = Settings { search: Search::Brave, cosmetic: false, auto_update: false, block_social: true, ..Default::default() };
+        let mut s = Settings { search: Search::Brave, cosmetic: false, auto_update: false, block_social: true, bookmarks_bar: false, new_tab_home: false, save_passwords: false, ..Default::default() };
         s.dns = crate::network::Dns::Custom("https://doh.example/dns-query".into());
         s.proxy = crate::network::Proxy::Manual { server: "socks5://127.0.0.1:9050".into(), bypass: "localhost".into() };
         s.allowed_sites.insert("example.com".into());

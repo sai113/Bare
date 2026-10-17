@@ -32,6 +32,12 @@ pub fn is_default_browser() -> bool {
     .is_some_and(|v| v.eq_ignore_ascii_case("BareURL"))
 }
 
+/// Is Windows set to dark mode for apps?
+pub fn dark_mode() -> bool {
+    reg_query(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme")
+        .is_some_and(|v| v.trim() == "0x0")
+}
+
 /// Opens Windows' Default apps page for Bare. Windows doesn't let apps make themselves the
 /// default; the user confirms there.
 pub fn open_default_apps_settings() {
@@ -56,9 +62,12 @@ fn reg_query(key: &str, value: &str) -> Option<String> {
             return None;
         }
         let text = String::from_utf8_lossy(&out.stdout);
-        // "    ProgId    REG_SZ    BareURL"
-        text.lines()
-            .find_map(|l| l.trim().strip_prefix(value)?.trim().strip_prefix("REG_SZ").map(|v| v.trim().to_string()))
+        // "    ProgId    REG_SZ    BareURL" / "    AppsUseLightTheme    REG_DWORD    0x0"
+        text.lines().find_map(|l| {
+            let rest = l.trim().strip_prefix(value)?.trim_start();
+            let (kind, data) = rest.split_once(char::is_whitespace)?;
+            kind.starts_with("REG_").then(|| data.trim().to_string())
+        })
     }
     #[cfg(not(windows))]
     {

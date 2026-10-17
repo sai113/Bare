@@ -122,12 +122,15 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bare"
-version = "0.3.1"
+version = "0.5.0"
 dependencies = [
  "adblock",
  "cef",
  "ed25519-dalek",
+ "serde",
+ "serde_json",
  "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

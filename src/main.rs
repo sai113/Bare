@@ -5,11 +5,16 @@
 
 mod app;
 mod block;
+mod bookmarks;
 mod downloads;
 mod handlers;
+mod history;
+mod memory;
 mod network;
 mod pages;
+mod passwords;
 mod permissions;
+mod reader;
 mod settings;
 mod system;
 mod ui;

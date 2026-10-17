@@ -4,7 +4,14 @@ use std::path::PathBuf;
 
 use cef::*;
 
-use crate::{block, handlers, network, permissions, settings, system, ui, update, url};
+use crate::{block, bookmarks, handlers, history, network, passwords, permissions, settings, system, ui, update};
+
+/// This process is a private window (nothing about browsing is saved).
+pub static PRIVATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_private() -> bool {
+    PRIVATE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Runs one CEF process. The browser process returns when the last window closes; renderer,
 /// GPU and utility processes return from `execute_process` immediately.
@@ -30,11 +37,15 @@ pub fn run(args: &args::Args, sandbox_info: *mut u8) -> i32 {
     }
     block::init(&root, settings::get().extras());
     permissions::init(&root);
+    history::init(&root);
+    bookmarks::init(&root);
+    passwords::init(&root);
     update::init(&root);
 
     // A private window runs as its own Bare process with a throwaway Chromium folder, so it
     // never hands off to (or shares anything with) an already open normal window.
     let private = cmd_line.has_switch(Some(&CefString::from("private"))) == 1;
+    PRIVATE.store(private, std::sync::atomic::Ordering::Relaxed);
     let (cef_root, cache) = if private {
         let tmp = std::env::temp_dir().join(format!("bare-private-{}", std::process::id()));
         (tmp, String::new())
@@ -117,6 +128,33 @@ wrap_app! {
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
             Some(BareProcessHandler::new())
         }
+
+        fn render_process_handler(&self) -> Option<RenderProcessHandler> {
+            Some(RenderHandler::new())
+        }
+    }
+}
+
+/// Name of the message a page's process sends with its process id (for the tab's memory use).
+pub const PID_MESSAGE: &str = "bare-pid";
+
+wrap_render_process_handler! {
+    struct RenderHandler;
+
+    impl RenderProcessHandler {
+        /// Runs in the (sandboxed) page process each time a page starts: tell the browser which
+        /// process is showing this tab.
+        fn on_context_created(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _context: Option<&mut V8Context>) {
+            let Some(frame) = frame else { return };
+            if frame.is_main() != 1 {
+                return;
+            }
+            let Some(mut msg) = process_message_create(Some(&CefString::from(PID_MESSAGE))) else { return };
+            if let Some(args) = msg.argument_list() {
+                args.set_int(0, std::process::id() as _);
+            }
+            frame.send_process_message(ProcessId::BROWSER, Some(&mut msg));
+        }
     }
 }
 
@@ -131,7 +169,7 @@ wrap_browser_process_handler! {
 
             // The first link/file/search given on the command line; others open as more tabs.
             let mut targets = cl.as_ref().map(launch_targets).unwrap_or_default();
-            let start = if targets.is_empty() { url::BLANK.to_string() } else { targets.remove(0) };
+            let start = if targets.is_empty() { ui::NEW_TAB.to_string() } else { targets.remove(0) };
             for extra in targets {
                 ui::defer(move |ui| ui.open_target(&extra));
             }
@@ -167,7 +205,7 @@ wrap_browser_process_handler! {
             let targets = command_line.as_ref().map(|cl| launch_targets(cl)).unwrap_or_default();
             ui::defer(move |ui| {
                 if targets.is_empty() {
-                    ui.open_target(url::BLANK);
+                    ui.open_target(ui::NEW_TAB);
                 }
                 for t in &targets {
                     ui.open_target(t);
