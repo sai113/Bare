@@ -6,6 +6,8 @@ CEF_PATH = { value = "vendor/cef", relative = true }
 # release archives will be uploaded. Both are GitHub Releases of sai113/Bare.
 BARE_UPDATE_URL = "https://github.com/sai113/Bare/releases/latest/download/latest.txt"
 BARE_DOWNLOAD_URL = "https://github.com/sai113/Bare/releases/download/v{version}/{file}"
+# Where Bare looks for Chromium engine updates approved with `cargo xtask engine`.
+BARE_ENGINE_URL = "https://github.com/sai113/Bare/releases/latest/download/engines.txt"
 
 [alias]
 xtask = "run --release -p xtask --"

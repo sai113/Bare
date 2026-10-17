@@ -10,6 +10,10 @@ mod bookmarks;
 #[cfg(all(windows, feature = "sandbox"))]
 mod downloads;
 #[cfg(all(windows, feature = "sandbox"))]
+mod engine;
+#[cfg(all(windows, feature = "sandbox"))]
+mod engine_files;
+#[cfg(all(windows, feature = "sandbox"))]
 mod handlers;
 #[cfg(all(windows, feature = "sandbox"))]
 mod history;
@@ -35,6 +39,8 @@ mod ui;
 mod update;
 #[cfg(all(windows, feature = "sandbox"))]
 mod url;
+#[cfg(all(windows, feature = "sandbox"))]
+mod winres;
 
 #[cfg(all(windows, feature = "sandbox"))]
 #[unsafe(no_mangle)]

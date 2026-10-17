@@ -7,6 +7,8 @@ mod app;
 mod block;
 mod bookmarks;
 mod downloads;
+mod engine;
+mod engine_files;
 mod handlers;
 mod history;
 mod memory;
@@ -20,6 +22,8 @@ mod system;
 mod ui;
 mod update;
 mod url;
+#[cfg(windows)]
+mod winres;
 
 #[cfg(not(all(windows, feature = "sandbox")))]
 fn main() {

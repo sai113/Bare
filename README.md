@@ -22,7 +22,7 @@ A minimal, private web browser built on Chromium. Tabs, an address bar, and noth
 The installer:
 - installs Bare for your user only, in `%LOCALAPPDATA%\Programs\Bare`, where it keeps itself up to date
 - adds **Bare** and **Bare (private window)** to the Start menu, plus an optional desktop shortcut
-- registers Bare as a browser. To make it your default, go to Settings → About → **Make default** (or Windows Settings → Apps → Default apps → Bare)
+- registers Bare as a browser. To make it your default, go to Settings → About → **Make default**: Windows Settings opens at Default apps; choose **Bare**, then **Set default**
 - can be removed from **Windows Settings → Apps**, like any app. It asks whether to also delete your browsing data
 
 Prefer no installer? Download `Bare-<version>-windows-x86_64.zip` instead, unzip it somewhere you can write to (not Program Files) and run `Bare.exe`. It works the same, except it can't become your default browser.
@@ -42,7 +42,7 @@ Prefer no installer? Download `Bare-<version>-windows-x86_64.zip` instead, unzip
 | Picture-in-picture | Right-click a video → **Picture in picture**, or `Alt+P` for the video on the page |
 | Navigation | `Alt+Left` / `Alt+Right`, `F5` or `Ctrl+R` to reload |
 | Downloads | `Ctrl+J` or the ↓ button opens `bare://downloads`: progress, pause/resume, cancel, open, show in folder. The ↓ button shows live progress. Files go to your Downloads folder, or Bare can ask each time |
-| Settings | The ⚙ button opens `bare://settings`: search engine, new-tab page, blocking, per-site exceptions, download location, clearing browsing data, updates |
+| Settings | The ⚙ button opens `bare://settings`: search engine, new-tab page, blocking, per-site exceptions, download location, clearing browsing data, Bare updates and **Chromium engine updates** |
 | Blocker | The toolbar shows how many requests were blocked on the page. Click it to turn blocking off for a site that breaks (remembered; manage the list in Settings) |
 | Secure DNS | Settings → Network: Automatic (default, like Chrome), Off, Cloudflare, Google, Quad9, AdGuard, Mullvad, NextDNS, CleanBrowsing, OpenDNS, or a custom DNS-over-HTTPS URL. Applies immediately |
 | Proxy | Settings → Network: system settings (default), no proxy, manual (`http`, `https`, `socks4`, `socks5` + bypass list) or a PAC URL. Applies immediately |
@@ -112,6 +112,19 @@ Every installed copy of Bare then finds it within a day (or right away with Sett
 
 Update logs are written to `%LOCALAPPDATA%\Bare\update\update.log`.
 
+### Chromium engine updates
+
+The Chromium engine (CEF: `libcef.dll`, its resources and the sandbox launcher) can be updated **separately from Bare**, so Chromium security fixes can reach users without a new Bare release. This works because Bare talks to CEF through its versioned API, and newer CEF builds keep supporting older API versions. Bare 0.5.0 (built on Chromium 154) was tested running on Chromium 156.
+
+Settings → About shows **Chromium engine** with its version and a **Check now** button. When an engine you've approved is newer than the installed one, it offers **Update engine**. The download comes straight from CEF's official build server (`cef-builds.spotifycdn.com`), about 170 MB. It must match the SHA-256 in `engines.txt`, which is **signed with the same key as Bare's updates**, so nothing installs without your approval. It's unpacked in the background and installed when Bare restarts, the same way as Bare updates. Old engine files the new engine doesn't have are removed, and a later Bare update never replaces a newer engine with an older one. Bare checks for engines along with its daily update check, but only downloads one when you click.
+
+To approve a new engine:
+
+1. Find the version on [CEF's build server](https://cef-builds.spotifycdn.com/index.html) (e.g. `156.0.7`).
+2. `cargo xtask engine 156.0.7` downloads it (checking CEF's SHA-1) and builds `dist/engine-test`: your current Bare running on that engine. Try it with **Try Bare (test profile).cmd** inside that folder. It uses its own profile, because a newer Chromium upgrades the profile it opens.
+3. If it works: `cargo xtask engine 156.0.7 --approve` signs `dist/engines.txt` and `data/engines.txt`. Beta builds also need `--beta`.
+4. Attach `dist/engines.txt` to the **latest** GitHub release (replace the old one), and commit `data/engines.txt`. Later `cargo xtask release` runs copy it into `dist/` so it stays attached to the newest release.
+
 ## Security model
 
 - **Chromium sandbox.** Renderer, GPU and utility processes run sandboxed. On Windows this uses CEF's `bootstrap.exe` launcher (shipped as `Bare.exe`), which loads `Bare.dll` inside the sandbox.
@@ -159,7 +172,7 @@ src/update.rs     signed auto-updates
 src/url.rs        address-bar parsing, HTTPS-only rules
 src/lib.rs        Windows sandbox entry point (RunWinMain)
 src/main.rs       executable entry point (Linux, macOS, Windows without sandbox)
-xtask/            cargo xtask package | keygen | release
+xtask/            cargo xtask package | keygen | release | engine
 installer/bare.iss  Windows installer (Inno Setup)
 src/system.rs     default-browser status, opening links and files from other apps
 src/history.rs    browsing history and address-bar ranking
@@ -167,6 +180,9 @@ src/bookmarks.rs  bookmarks, the bookmarks bar, import from Chrome/Edge/Brave
 src/memory.rs     per-tab memory use
 src/passwords.rs  password vault (DPAPI-encrypted), login capture and fill
 src/reader.rs     reader view (Mozilla Readability)
+src/engine.rs     Chromium engine updates, separate from Bare's own
+src/engine_files.rs  which files make up the engine (shared with xtask)
+src/winres.rs     gives CEF's launcher Bare's icon and version (shared with xtask)
 .github/workflows/ci.yml  tests and builds every pull request (GitHub Actions)
 assets/           app icon, Mozilla Readability (Apache-2.0)
 data/             filter lists, update public key

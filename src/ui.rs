@@ -1453,6 +1453,8 @@ impl Ui {
             (Some(Page::Settings), "make-default") => crate::system::open_default_apps_settings(),
             (Some(Page::Settings), "update-restart") => self.act(Action::UpdateRestart),
             (Some(Page::Settings), "open-passwords") => return self.open_page(Page::Passwords),
+            (Some(Page::Settings), "engine-check") => crate::engine::check(),
+            (Some(Page::Settings), "engine-update") => crate::engine::download(),
             (Some(Page::Passwords), "pw-reveal") => {
                 // Only to the passwords page that asked, and only the one password.
                 let (origin, username) = (param("origin"), param("username"));
@@ -1659,7 +1661,7 @@ Memory usage: {}", memory::format_bytes(bytes)));
             list => format!("↓ {}", list.len()),
         };
         self.downloads.set_text(Some(&CefString::from(label.as_str())));
-        View::from(&self.update).set_visible(matches!(update::status(), update::Status::Ready { .. }) as _);
+        View::from(&self.update).set_visible((matches!(update::status(), update::Status::Ready { .. }) || crate::engine::is_ready()) as _);
 
         // 📖 on pages that look like articles, and in reader view (to leave it).
         let (readerable, in_reader) = self.tabs.get(self.active).map_or((false, false), |t| (t.readerable && t.page.is_none(), t.in_reader));

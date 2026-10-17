@@ -227,7 +227,7 @@ fn settings_json() -> String {
         js_string(&notice()),
     );
     format!(
-        "{{{net}\"newTabHome\":{},\"registered\":{},\"isDefault\":{},\"search\":\"{}\",\"engines\":[{}],\"blocking\":{},\"cosmetic\":{},\"social\":{},\"cookies\":{},\"allowed\":[{}],\"ask\":{},\"autoUpdate\":{},\"wipe\":{},\"version\":{},\"update\":{},\"updateReady\":{},\"updateEnabled\":{}}}",
+        "{{{net}\"newTabHome\":{},\"registered\":{},\"isDefault\":{},\"search\":\"{}\",\"engines\":[{}],\"blocking\":{},\"cosmetic\":{},\"social\":{},\"cookies\":{},\"allowed\":[{}],\"ask\":{},\"autoUpdate\":{},\"wipe\":{},\"version\":{},\"update\":{},\"updateReady\":{},\"updateEnabled\":{},\"engine\":{},\"engineStatus\":{},\"engineAction\":\"{}\"}}",
         s.new_tab_home,
         system::registered_as_browser(),
         system::is_default_browser(),
@@ -245,6 +245,9 @@ fn settings_json() -> String {
         js_string(&status.describe()),
         matches!(status, update::Status::Ready { .. }),
         !matches!(status, update::Status::Disabled(_)),
+        js_string(crate::engine_files::chromium(&crate::engine::running())),
+        js_string(&crate::engine::status().describe()),
+        crate::engine::status().action(),
     )
 }
 
@@ -421,12 +424,16 @@ function render(s){
   const upd=el('div',{className:'row'},el('div',{className:'grow'},el('div',{textContent:'Bare '+s.version}),el('div',{className:'sub',textContent:s.update})));
   if(s.updateReady)upd.append(el('button',{className:'primary',textContent:'Restart to update',onclick:()=>A('update-restart')}));
   else if(s.updateEnabled)upd.append(el('button',{textContent:'Check now',onclick:()=>A('update-check')}));
+  const eng=row('Chromium engine '+s.engine,s.engineStatus);
+  if(s.engineAction==='update')eng.append(el('button',{className:'primary',textContent:'Update engine',onclick:()=>A('engine-update')}));
+  else if(s.engineAction==='restart')eng.append(el('button',{className:'primary',textContent:'Restart to update',onclick:()=>A('update-restart')}));
+  else if(s.engineAction==='check')eng.append(el('button',{textContent:'Check now',onclick:()=>A('engine-check')}));
   const def = s.isDefault
     ? row('Default browser','Bare opens links from other apps.')
     : s.registered
-      ? row('Default browser','Open links from email, chat and other apps in Bare.',el('button',{className:'primary',textContent:'Make default',onclick:()=>A('make-default')}))
+      ? row('Default browser','Open links from email, chat and other apps in Bare. Windows Settings opens: choose Bare there, then Set default.',el('button',{className:'primary',textContent:'Make default',onclick:()=>A('make-default')}))
       : row('Default browser','Install Bare with BareSetup.exe to make it your default browser.');
-  document.getElementById('about').replaceChildren(def,upd,toggle('autoUpdate',s.autoUpdate,'Update automatically','Checks once a day. Updates are verified with a signature before installing.'));
+  document.getElementById('about').replaceChildren(def,upd,eng,toggle('autoUpdate',s.autoUpdate,'Update automatically','Checks once a day. Updates are verified with a signature before installing.'));
 }
 "#;
 

@@ -1,4 +1,7 @@
 //! Replaces the icon and version info of CEF's bootstrap.exe so it shows up as "Bare".
+//!
+//! Shared by `cargo xtask package` and the engine updater (which brands each new engine's
+//! launcher the same way).
 
 use std::{ffi::c_void, path::Path, ptr};
 
@@ -14,7 +17,7 @@ use windows_sys::{
     core::{BOOL, PCWSTR},
 };
 
-use crate::Result;
+type Result<T> = std::result::Result<T, String>;
 
 const LANG_EN_US: u16 = 0x0409;
 
@@ -22,8 +25,10 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-pub fn brand(exe: &Path, ico: &Path, version: &str) -> Result<()> {
-    let ico = std::fs::read(ico)?;
+pub fn brand(exe: &Path, ico: &[u8], version: &str) -> Result<()> {
+    if ico.len() < 6 {
+        return Err("bad icon".into());
+    }
     let existing = existing_resources(exe)?;
     let path = wide(&exe.to_string_lossy());
     unsafe {
@@ -37,13 +42,20 @@ pub fn brand(exe: &Path, ico: &Path, version: &str) -> Result<()> {
         }
         // Icon images (RT_ICON 1..n) plus the group directory (RT_GROUP_ICON 1).
         let count = u16::from_le_bytes([ico[4], ico[5]]) as usize;
+        if ico.len() < 6 + 16 * count {
+            EndUpdateResourceW(h, 1);
+            return Err("bad icon".into());
+        }
         let mut group = vec![0, 0, 1, 0];
         group.extend_from_slice(&(count as u16).to_le_bytes());
         for i in 0..count {
             let e = &ico[6 + 16 * i..6 + 16 * (i + 1)];
-            let size = u32::from_le_bytes(e[8..12].try_into()?) as usize;
-            let offset = u32::from_le_bytes(e[12..16].try_into()?) as usize;
-            let image = &ico[offset..offset + size];
+            let size = u32::from_le_bytes([e[8], e[9], e[10], e[11]]) as usize;
+            let offset = u32::from_le_bytes([e[12], e[13], e[14], e[15]]) as usize;
+            let Some(image) = ico.get(offset..offset + size) else {
+                EndUpdateResourceW(h, 1);
+                return Err("bad icon".into());
+            };
             let id = (i + 1) as u16;
             UpdateResourceW(h, RT_ICON, id as usize as PCWSTR, LANG_EN_US, image.as_ptr() as *const c_void, size as u32);
             group.extend_from_slice(&e[..12]);

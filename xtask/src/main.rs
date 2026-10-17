@@ -4,6 +4,9 @@
 //!   `dist/Bare` with the Chromium (CEF) runtime and filter lists next to it.
 //! - `cargo xtask keygen`: creates the update-signing key pair (once per project).
 //! - `cargo xtask release`: packages, archives and signs a release, writing `dist/latest.txt`.
+//! - `cargo xtask engine <CEF version>`: downloads that Chromium engine from CEF's build server
+//!   and builds `dist/engine-test` (this Bare on that engine) to try it out. With `--approve`, signs
+//!   `engines.txt` so installed copies of Bare offer it in Settings.
 
 use std::{
     env, fs,
@@ -15,11 +18,15 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
+#[path = "../../src/winres.rs"]
 mod winres;
+
+#[path = "../../src/engine_files.rs"]
+mod engine_files;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-const USAGE: &str = "usage: cargo xtask <package | keygen | release>";
+const USAGE: &str = "usage: cargo xtask <package | keygen | release | engine <CEF version> [--approve] [--beta]>";
 
 fn main() -> ExitCode {
     let task = env::args().nth(1);
@@ -27,6 +34,7 @@ fn main() -> ExitCode {
         Some("package") => package(),
         Some("keygen") => keygen(),
         Some("release") => release(),
+        Some("engine") => engine(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::FAILURE;
@@ -66,13 +74,15 @@ fn package() -> Result<()> {
     fs::create_dir_all(&out)?;
 
     // Chromium runtime: libraries, resource packs, locales and license notices.
+    let mut engine_names = Vec::new();
     for entry in fs::read_dir(&cef)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
         if path.is_dir() {
             if name == "locales" {
-                copy_dir(&path, &out.join(name))?;
+                copy_dir(&path, &out.join(&name))?;
+                engine_names.push(name);
             }
             continue;
         }
@@ -82,8 +92,20 @@ fn package() -> Result<()> {
             || name == "CMakeLists.txt";
         if !skip {
             fs::copy(&path, out.join(&name))?;
+            engine_names.push(name);
         }
     }
+    // Record the engine and its files, so an engine update knows what it replaces.
+    if cfg!(windows) {
+        engine_names.push("Bare.exe".into());
+    }
+    engine_names.sort();
+    let archive_info: serde_json::Value = serde_json::from_str(&fs::read_to_string(cef.join("archive.json"))?)?;
+    let engine = archive_info["name"]
+        .as_str()
+        .and_then(engine_files::version_of_archive)
+        .ok_or("can't tell the CEF version from archive.json")?;
+    engine_files::write_manifest(&out, &engine, &engine_names)?;
     fs::copy(root.join("LICENSE"), out.join("LICENSE.txt"))?;
     // Mozilla Readability (reader mode) is built into Bare.dll.
     fs::copy(root.join("assets/readability/LICENSE.md"), out.join("LICENSE-readability.txt"))?;
@@ -114,12 +136,12 @@ fn package() -> Result<()> {
         #[cfg(windows)]
         {
             // Antivirus scanners briefly lock the freshly copied exe; retry a few times.
-            let (ico, version) = (root.join("assets").join("bare.ico"), version(&root)?);
+            let (ico, version) = (fs::read(root.join("assets").join("bare.ico"))?, version(&root)?);
             let mut attempt = 0;
             while let Err(e) = winres::brand(&exe, &ico, &version) {
                 attempt += 1;
                 if attempt == 5 {
-                    return Err(e);
+                    return Err(e.into());
                 }
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
@@ -210,16 +232,7 @@ fn release() -> Result<()> {
             .into());
     }
     let root = root();
-    let seed: [u8; 32] = fs::read_to_string(key_path())
-        .ok()
-        .and_then(|t| unhex(t.trim()))
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| format!("no signing key at {} (run `cargo xtask keygen`)", key_path().display()))?;
-    let key = SigningKey::from_bytes(&seed);
-    let public = fs::read_to_string(root.join("data").join("update-key.pub"))?;
-    if public.trim() != hex(&key.verifying_key().to_bytes()) {
-        return Err("data/update-key.pub doesn't match your signing key".into());
-    }
+    let key = signing_key(&root)?;
 
     package()?;
     let version = version(&root)?;
@@ -266,6 +279,12 @@ fn release() -> Result<()> {
     println!("Release {version} for {platform}:");
     println!("  upload {} to {url}", archive.display());
     println!("  publish {} at $BARE_UPDATE_URL", manifest_path.display());
+    // Carry the approved engine forward, so engines.txt stays at the latest release's address.
+    let approved = root.join("data").join("engines.txt");
+    if approved.exists() {
+        fs::copy(&approved, dist.join("engines.txt"))?;
+        println!("  attach {} (the approved Chromium engine)", dist.join("engines.txt").display());
+    }
 
     if cfg!(windows) {
         match build_installer(&root, &version)? {
@@ -273,6 +292,161 @@ fn release() -> Result<()> {
             None => println!("  (Inno Setup not found: skipped BareSetup.exe. Install it with `winget install JRSoftware.InnoSetup`.)"),
         }
     }
+    Ok(())
+}
+
+/// The update-signing key, checked against the public key built into Bare.
+fn signing_key(root: &Path) -> Result<SigningKey> {
+    let seed: [u8; 32] = fs::read_to_string(key_path())
+        .ok()
+        .and_then(|t| unhex(t.trim()))
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| format!("no signing key at {} (run `cargo xtask keygen`)", key_path().display()))?;
+    let key = SigningKey::from_bytes(&seed);
+    let public = fs::read_to_string(root.join("data").join("update-key.pub"))?;
+    if public.trim() != hex(&key.verifying_key().to_bytes()) {
+        return Err("data/update-key.pub doesn't match your signing key".into());
+    }
+    Ok(key)
+}
+
+const CEF_BUILDS: &str = "https://cef-builds.spotifycdn.com/";
+
+/// `cargo xtask engine <CEF version> [--approve] [--beta]`
+///
+/// Without `--approve`: downloads the engine from CEF's build server (checking CEF's SHA-1)
+/// and builds dist/engine-test, the packaged Bare running on that engine, to try out.
+/// With `--approve`: signs engines.txt (data/ and dist/) so installed copies offer it.
+fn engine() -> Result<()> {
+    let args: Vec<String> = env::args().skip(2).collect();
+    let wanted = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .ok_or("usage: cargo xtask engine <CEF version, e.g. 156.0.7> [--approve] [--beta]")?;
+    let approve = args.iter().any(|a| a == "--approve");
+    let allow_beta = args.iter().any(|a| a == "--beta");
+    let root = root();
+    let dist = root.join("dist");
+    let platform = format!("{}-{}", env::consts::OS, env::consts::ARCH);
+    let cef_platform = match (env::consts::OS, env::consts::ARCH) {
+        ("windows", "x86_64") => "windows64",
+        ("windows", "aarch64") => "windowsarm64",
+        ("linux", "x86_64") => "linux64",
+        ("linux", "aarch64") => "linuxarm64",
+        ("macos", "aarch64") => "macosarm64",
+        ("macos", "x86_64") => "macosx64",
+        _ => return Err("no CEF builds for this platform".into()),
+    };
+
+    // Find the build in CEF's index.
+    let index = Command::new("curl").args(["-fsSL", &format!("{CEF_BUILDS}index.json")]).output()?;
+    if !index.status.success() {
+        return Err("couldn't download CEF's build index".into());
+    }
+    let index: serde_json::Value = serde_json::from_slice(&index.stdout)?;
+    let build = index[cef_platform]["versions"]
+        .as_array()
+        .ok_or("unexpected CEF index format")?
+        .iter()
+        .find(|v| v["cef_version"].as_str().is_some_and(|c| c == wanted || engine_files::cef_number(c) == wanted))
+        .ok_or_else(|| format!("CEF {wanted} isn't on CEF's build server for {cef_platform}"))?;
+    let channel = build["channel"].as_str().unwrap_or("stable");
+    let file = build["files"]
+        .as_array()
+        .and_then(|files| files.iter().find(|f| f["type"] == "minimal"))
+        .ok_or("that build has no minimal distribution")?;
+    let (name, sha1, size) = (
+        file["name"].as_str().ok_or("bad CEF index")?,
+        file["sha1"].as_str().ok_or("bad CEF index")?.to_ascii_lowercase(),
+        file["size"].as_u64().unwrap_or(0),
+    );
+    let engine = engine_files::version_of_archive(name).ok_or("unexpected CEF archive name")?;
+    // '+' must be escaped: the CDN would read it as a space.
+    let url = format!("{CEF_BUILDS}{}", name.replace('+', "%2B"));
+    println!("CEF {engine} ({channel}), {} MB", size / 1_000_000);
+
+    // Download once, verified against CEF's published SHA-1.
+    let cache = dist.join("engines");
+    fs::create_dir_all(&cache)?;
+    let archive = cache.join(name);
+    let sha1_of = |p: &Path| -> Result<String> { Ok(hex(&sha1::Sha1::digest(fs::read(p)?))) };
+    if !archive.exists() || sha1_of(&archive)? != sha1 {
+        println!("Downloading {url}");
+        let partial = cache.join(format!("{name}.part"));
+        if !Command::new("curl").args(["-fL", "--retry", "3", "-o"]).arg(&partial).arg(&url).status()?.success() {
+            return Err("download failed".into());
+        }
+        fs::rename(&partial, &archive)?;
+        if sha1_of(&archive)? != sha1 {
+            fs::remove_file(&archive)?;
+            return Err("the download doesn't match CEF's published SHA-1".into());
+        }
+    }
+    let sha256 = hex(&Sha256::digest(fs::read(&archive)?));
+
+    if approve {
+        if channel != "stable" && !allow_beta {
+            return Err(format!("CEF {engine} is a {channel} build; add --beta to approve it anyway").into());
+        }
+        let key = signing_key(&root)?;
+        // Must match `update::signed_message_for(Kind::Engine, ..)` in the app.
+        let message = format!("bare-engine\n{engine}\n{platform}\n{url}\n{sha256}");
+        let signature = hex(&key.sign(message.as_bytes()).to_bytes());
+        let text = format!(
+            "engine={engine}\n{platform}.url={url}\n{platform}.sha256={sha256}\n{platform}.size={size}\n{platform}.signature={signature}\n"
+        );
+        fs::write(root.join("data").join("engines.txt"), &text)?;
+        fs::write(dist.join("engines.txt"), &text)?;
+        println!("Approved Chromium {} for {platform}.", engine_files::chromium(&engine));
+        println!("  Upload {} to your latest GitHub release (replacing the old one).", dist.join("engines.txt").display());
+        println!("  Bare offers it under Settings > About; users download it from CEF's server.");
+        println!("  Commit data/engines.txt so later releases keep offering it.");
+        return Ok(());
+    }
+
+    // Build dist/engine-test: the packaged Bare, with its engine swapped for this one.
+    let app = dist.join("Bare");
+    if !app.join(engine_files::MANIFEST).exists() {
+        package()?;
+    }
+    let test = dist.join("engine-test");
+    if test.exists() {
+        fs::remove_dir_all(&test)?;
+    }
+    copy_dir(&app, &test)?;
+    if let Some((_, files)) = engine_files::read_manifest(&test) {
+        for f in files {
+            let p = test.join(f);
+            if p.is_dir() { fs::remove_dir_all(p)? } else { fs::remove_file(p)? }
+        }
+    }
+    let unpacked = cache.join("unpacked");
+    if unpacked.exists() {
+        fs::remove_dir_all(&unpacked)?;
+    }
+    fs::create_dir_all(&unpacked)?;
+    if !Command::new("tar").arg("-xjf").arg(&archive).arg("-C").arg(&unpacked).status()?.success() {
+        return Err("couldn't unpack the engine".into());
+    }
+    let cef_root = fs::read_dir(&unpacked)?.filter_map(|e| e.ok().map(|e| e.path())).find(|p| p.is_dir()).ok_or("empty archive")?;
+    let names = engine_files::assemble(&cef_root, &test)?;
+    #[cfg(windows)]
+    winres::brand(&test.join("Bare.exe"), &fs::read(root.join("assets").join("bare.ico"))?, &version(&root)?)?;
+    engine_files::write_manifest(&test, &engine, &names)?;
+    fs::remove_dir_all(&unpacked)?;
+    let launcher = if cfg!(windows) { "Try Bare (test profile).cmd" } else { "try-bare.sh" };
+    if cfg!(windows) {
+        // A separate profile: a newer Chromium upgrades the profile it opens.
+        fs::write(test.join(launcher), "@echo off\r\nset \"LOCALAPPDATA=%~dp0test-profile\"\r\nstart \"\" \"%~dp0Bare.exe\" %*\r\n")?;
+    } else {
+        fs::write(test.join(launcher), "#!/bin/sh\nXDG_DATA_HOME=\"$(dirname \"$0\")/test-profile\" exec \"$(dirname \"$0\")/bare\" \"$@\"\n")?;
+    }
+    println!("Built {} with Chromium {}.", test.display(), engine_files::chromium(&engine));
+    println!("  Try it with \"{}\" (uses its own test profile, not your real one).", test.join(launcher).display());
+    if channel != "stable" {
+        println!("  Note: this is a {channel} build.");
+    }
+    println!("  If it works, approve it: cargo xtask engine {wanted} --approve{}", if channel != "stable" { " --beta" } else { "" });
     Ok(())
 }
 

@@ -67,7 +67,7 @@ impl Status {
 
 thread_local! {
     static STATUS: RefCell<Status> = const { RefCell::new(Status::Idle) };
-    static ACTIVE: RefCell<Option<Urlrequest>> = const { RefCell::new(None) };
+    static ACTIVE: RefCell<Vec<Urlrequest>> = const { RefCell::new(Vec::new()) };
 }
 
 static PROFILE: OnceLock<PathBuf> = OnceLock::new();
@@ -86,11 +86,11 @@ pub fn platform() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
-fn update_dir() -> Option<PathBuf> {
+pub(crate) fn update_dir() -> Option<PathBuf> {
     PROFILE.get().map(|p| p.join("update"))
 }
 
-fn app_dir() -> Option<PathBuf> {
+pub(crate) fn app_dir() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
 }
 
@@ -109,7 +109,7 @@ pub fn init(profile: &Path) {
     }
 }
 
-fn disabled_reason() -> Option<&'static str> {
+pub(crate) fn disabled_reason() -> Option<&'static str> {
     if MANIFEST_URL.is_none_or(str::is_empty) {
         return Some("Updates aren't configured for this build (no update URL).");
     }
@@ -138,6 +138,7 @@ pub fn maybe_check_automatically() {
     let last: u64 = stamp.as_ref().and_then(|p| fs::read_to_string(p).ok()).and_then(|t| t.trim().parse().ok()).unwrap_or(0);
     if now() >= last + CHECK_EVERY_SECS {
         check();
+        crate::engine::check();
     }
 }
 
@@ -148,6 +149,10 @@ fn now() -> u64 {
 /// Fetches the manifest and, if a newer verified release exists, downloads and stages it.
 pub fn check() {
     if matches!(status(), Status::Disabled(_) | Status::Checking | Status::Downloading { .. } | Status::Ready { .. }) {
+        return;
+    }
+    // One staged update at a time: not while a new engine is downloading or waiting to install.
+    if crate::engine::busy() {
         return;
     }
     if let Some(dir) = update_dir() {
@@ -220,13 +225,32 @@ fn stage(package: &Path, dir: &Path, version: &str) -> Result<(), String> {
         clear_staging();
         return Err("couldn't unpack the update".into());
     }
+    keep_newer_engine(&staging);
     fs::write(dir.join("staging-version.txt"), version).map_err(|e| e.to_string())
 }
 
-fn clear_staging() {
+/// If the engine installed now (from an engine update) is newer than the one bundled with this
+/// Bare update, keeps it: drops the bundled engine's files from the staged update. Going back
+/// to an older Chromium could make it refuse the newer profile.
+fn keep_newer_engine(staging: &Path) {
+    let Some((bundled, files)) = crate::engine_files::read_manifest(staging) else { return };
+    let running = crate::engine::running();
+    if !newer(crate::engine_files::cef_number(&running), crate::engine_files::cef_number(&bundled)) {
+        return;
+    }
+    for name in files {
+        let path = staging.join(&name);
+        let _ = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+    }
+    let _ = fs::remove_file(staging.join(crate::engine_files::MANIFEST));
+}
+
+pub(crate) fn clear_staging() {
     if let Some(dir) = update_dir() {
         let _ = fs::remove_dir_all(dir.join("staging"));
-        let _ = fs::remove_file(dir.join("staging-version.txt"));
+        for marker in ["staging-version.txt", "staging-engine.txt", "staging-delete.txt"] {
+            let _ = fs::remove_file(dir.join(marker));
+        }
     }
 }
 
@@ -240,15 +264,36 @@ pub fn request_restart() {
 pub fn apply_if_staged() {
     let (Some(dir), Some(app)) = (update_dir(), app_dir()) else { return };
     let staging = dir.join("staging");
-    if !matches!(status(), Status::Ready { .. }) || !staging.exists() {
+    // A Bare update, or else an engine update (only one is staged at a time).
+    let version = match status() {
+        Status::Ready { version } => version,
+        _ if crate::engine::is_ready() => VERSION.to_string(),
+        _ => return,
+    };
+    if !staging.exists() {
         return;
     }
     let relaunch = RELAUNCH.load(std::sync::atomic::Ordering::Relaxed);
     let pid = std::process::id();
-    let marker = dir.join("staging-version.txt");
+    let markers = ["staging-version.txt", "staging-engine.txt", "staging-delete.txt"].map(|m| dir.join(m));
+    // Files of the old engine that a new engine no longer has.
+    let stale: Vec<String> = fs::read_to_string(&markers[2])
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|n| crate::engine_files::valid_name(n))
+        .map(String::from)
+        .collect();
     if cfg!(windows) {
         let script = dir.join("apply-update.cmd");
         let log = dir.join("update.log");
+        let delete: String = stale
+            .iter()
+            .map(|n| {
+                let p = app.join(n);
+                format!("if %rc% lss 8 if exist \"{p}\\*\" (rmdir /S /Q \"{p}\") else (del /F /Q \"{p}\" 2>nul)\r\n", p = p.display())
+            })
+            .collect();
         // Waits for Bare to exit, copies the update (robocopy retries while Chromium's child
         // processes release their files), and keeps the staged copy if anything failed.
         let text = format!(
@@ -256,19 +301,19 @@ pub fn apply_if_staged() {
              echo %date% %time% applying update >> \"{l}\"\r\n\
              powershell -NoProfile -NonInteractive -Command \"Wait-Process -Id {pid} -ErrorAction SilentlyContinue\"\r\n\
              robocopy \"{s}\" \"{a}\" /E /IS /IT /R:60 /W:1 /NP /NFL /NDL >> \"{l}\"\r\n\
-             if %errorlevel% geq 8 (echo copy failed: %errorlevel% >> \"{l}\") else (rmdir /S /Q \"{s}\" & del \"{m}\" & echo done >> \"{l}\")\r\n\
-             reg query \"{k}\" >nul 2>&1 && reg add \"{k}\" /v DisplayVersion /d \"{v}\" /f >nul 2>&1\r\n\
+             set rc=%errorlevel%\r\n\
+             {delete}\
+             if %rc% geq 8 (echo copy failed: %rc% >> \"{l}\") else (rmdir /S /Q \"{s}\" & del /Q \"{m0}\" \"{m1}\" \"{m2}\" 2>nul & echo done >> \"{l}\")\r\n\
+             reg query \"{k}\" >nul 2>&1 && reg add \"{k}\" /v DisplayVersion /d \"{version}\" /f >nul 2>&1\r\n\
              {relaunch}del \"%~f0\"\r\n",
             s = staging.display(),
             a = app.display(),
             l = log.display(),
-            m = marker.display(),
+            m0 = markers[0].display(),
+            m1 = markers[1].display(),
+            m2 = markers[2].display(),
             // Installed with BareSetup.exe: keep "Settings -> Apps" showing the right version.
             k = format!(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{{{INSTALLER_APP_ID}}}_is1"),
-            v = match status() {
-                Status::Ready { version } => version,
-                _ => String::new(),
-            },
             relaunch = if relaunch { format!("start \"\" \"{}\"\r\n", app.join("Bare.exe").display()) } else { String::new() },
         );
         if fs::write(&script, text).is_ok() {
@@ -276,11 +321,14 @@ pub fn apply_if_staged() {
         }
     } else {
         let script = dir.join("apply-update.sh");
+        let delete: String = stale.iter().map(|n| format!("rm -rf '{}'\n", app.join(n).display())).collect();
         let text = format!(
-            "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do sleep 1; done\ncp -a '{s}/.' '{a}/' && rm -rf '{s}' '{m}'\n{relaunch}rm -f \"$0\"\n",
+            "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do sleep 1; done\ncp -a '{s}/.' '{a}/' && {{\n{delete}rm -rf '{s}' '{m0}' '{m1}' '{m2}'\n}}\n{relaunch}rm -f \"$0\"\n",
             s = staging.display(),
             a = app.display(),
-            m = marker.display(),
+            m0 = markers[0].display(),
+            m1 = markers[1].display(),
+            m2 = markers[2].display(),
             relaunch = if relaunch { format!("'{}' &\n", app.join("bare").display()) } else { String::new() },
         );
         if fs::write(&script, text).is_ok() {
@@ -302,24 +350,55 @@ fn spawn_detached(cmd: &mut Command) {
 
 // ---- manifest ----
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: String,
     pub url: String,
     pub sha256: [u8; 32],
 }
 
-fn public_key() -> Option<VerifyingKey> {
+pub fn public_key() -> Option<VerifyingKey> {
     let bytes: [u8; 32] = from_hex(PUBLIC_KEY_HEX.trim())?.try_into().ok()?;
     VerifyingKey::from_bytes(&bytes).ok()
 }
 
-/// The exact bytes the release signature covers.
-pub fn signed_message(version: &str, platform: &str, url: &str, sha256_hex: &str) -> String {
-    format!("bare-update\n{version}\n{platform}\n{url}\n{sha256_hex}")
+/// What a signed manifest describes. Each kind signs with its own prefix, so a signature for
+/// one can never be passed off as the other.
+#[derive(Clone, Copy)]
+pub enum Kind {
+    /// `latest.txt`: a Bare release.
+    App,
+    /// `engines.txt`: a Chromium engine (CEF runtime).
+    Engine,
+}
+
+impl Kind {
+    fn tag(self) -> &'static str {
+        match self {
+            Kind::App => "bare-update",
+            Kind::Engine => "bare-engine",
+        }
+    }
+
+    fn field(self) -> &'static str {
+        match self {
+            Kind::App => "version",
+            Kind::Engine => "engine",
+        }
+    }
+}
+
+/// The exact bytes a manifest signature covers.
+pub fn signed_message_for(kind: Kind, version: &str, platform: &str, url: &str, sha256_hex: &str) -> String {
+    format!("{}\n{version}\n{platform}\n{url}\n{sha256_hex}", kind.tag())
 }
 
 pub fn parse_manifest(text: &str, platform: &str, key: &Option<VerifyingKey>) -> Result<Release, String> {
+    parse_signed(Kind::App, text, platform, key)
+}
+
+/// Reads and verifies a signed manifest (`latest.txt` or `engines.txt`).
+pub fn parse_signed(kind: Kind, text: &str, platform: &str, key: &Option<VerifyingKey>) -> Result<Release, String> {
     let key = key.as_ref().ok_or("no valid signing key in this build")?;
     let get = |k: &str| {
         text.lines()
@@ -328,7 +407,7 @@ pub fn parse_manifest(text: &str, platform: &str, key: &Option<VerifyingKey>) ->
             .map(|(_, v)| v.trim().to_string())
     };
     let missing = |what: &str| format!("the update manifest has no {what} for {platform}");
-    let version = get("version").ok_or("the update manifest has no version")?;
+    let version = get(kind.field()).ok_or_else(|| format!("the update manifest has no {}", kind.field()))?;
     let url = get(&format!("{platform}.url")).ok_or_else(|| missing("download"))?;
     let sha_hex = get(&format!("{platform}.sha256")).ok_or_else(|| missing("checksum"))?.to_ascii_lowercase();
     let sig_hex = get(&format!("{platform}.signature")).ok_or_else(|| missing("signature"))?;
@@ -339,7 +418,7 @@ pub fn parse_manifest(text: &str, platform: &str, key: &Option<VerifyingKey>) ->
     }
     let sha256: [u8; 32] = from_hex(&sha_hex).and_then(|b| b.try_into().ok()).ok_or("bad checksum in manifest")?;
     let sig: [u8; 64] = from_hex(&sig_hex).and_then(|b| b.try_into().ok()).ok_or("bad signature in manifest")?;
-    key.verify_strict(signed_message(&version, platform, &url, &sha_hex).as_bytes(), &Signature::from_bytes(&sig))
+    key.verify_strict(signed_message_for(kind, &version, platform, &url, &sha_hex).as_bytes(), &Signature::from_bytes(&sig))
         .map_err(|_| "the update's signature is invalid".to_string())?;
     Ok(Release { version, url, sha256 })
 }
@@ -366,8 +445,10 @@ pub fn from_hex(s: &str) -> Option<Vec<u8>> {
 
 // ---- downloading through Chromium's network stack ----
 
-enum Sink {
+pub(crate) enum Sink {
+    /// A small text file (a manifest).
     Memory(Vec<u8>),
+    /// A download written to disk, hashed as it arrives, with its size so far.
     File(File, Sha256, i64),
 }
 
@@ -377,16 +458,28 @@ struct Fetch {
     sink: Option<Sink>,
     error: Option<String>,
     done: Option<Done>,
+    progress: Box<dyn Fn(i32)>,
 }
 
 fn fetch(url: &str, sink: Sink, done: impl FnOnce(Result<Sink, String>) + 'static) {
-    let Some(request) = request_create() else { return set_status(Status::Failed("network unavailable".into())) };
+    fetch_with_progress(url, sink, |percent| {
+        if let Status::Downloading { version, .. } = status() {
+            STATUS.with(|s| *s.borrow_mut() = Status::Downloading { version, percent });
+            ui::with_ui(|ui| ui.on_update_status());
+        }
+    }, done);
+}
+
+/// Downloads `url` through Chromium's network stack (so proxy and secure DNS settings apply).
+pub(crate) fn fetch_with_progress(url: &str, sink: Sink, progress: impl Fn(i32) + 'static, done: impl FnOnce(Result<Sink, String>) + 'static) {
+    let Some(mut request) = request_create() else { return done(Err("network unavailable".into())) };
     request.set_url(Some(&CefString::from(url)));
-    let state = Rc::new(RefCell::new(Fetch { sink: Some(sink), error: None, done: Some(Box::new(done)) }));
+    let state = Rc::new(RefCell::new(Fetch { sink: Some(sink), error: None, done: Some(Box::new(done)), progress: Box::new(progress) }));
     let mut client = Fetcher::new(state);
-    let mut request = request;
-    let handle = urlrequest_create(Some(&mut request), Some(&mut client), None);
-    ACTIVE.with(|a| *a.borrow_mut() = handle);
+    if let Some(handle) = urlrequest_create(Some(&mut request), Some(&mut client), None) {
+        // Keep the request alive until it completes.
+        ACTIVE.with(|a| a.borrow_mut().push(handle));
+    }
 }
 
 wrap_urlrequest_client! {
@@ -395,7 +488,7 @@ wrap_urlrequest_client! {
     }
 
     impl UrlrequestClient {
-        fn on_download_data(&self, _request: Option<&mut Urlrequest>, data: *const u8, data_length: usize) {
+        fn on_download_data(&self, request: Option<&mut Urlrequest>, data: *const u8, data_length: usize) {
             if data.is_null() || data_length == 0 {
                 return;
             }
@@ -418,22 +511,20 @@ wrap_urlrequest_client! {
             if let Some(e) = err {
                 st.error.get_or_insert(e.to_string());
                 st.sink = None;
-                ACTIVE.with(|a| if let Some(r) = a.borrow().as_ref() { r.cancel() });
+                if let Some(r) = request {
+                    r.cancel();
+                }
             }
         }
 
         fn on_download_progress(&self, _request: Option<&mut Urlrequest>, current: i64, total: i64) {
             if total > 0 {
-                if let Status::Downloading { version, .. } = status() {
-                    let percent = (current * 100 / total) as i32;
-                    STATUS.with(|s| *s.borrow_mut() = Status::Downloading { version, percent });
-                    ui::with_ui(|ui| ui.on_update_status());
-                }
+                (self.state.borrow().progress)((current * 100 / total) as i32);
             }
         }
 
         fn on_request_complete(&self, request: Option<&mut Urlrequest>) {
-            ACTIVE.with(|a| a.borrow_mut().take());
+            ACTIVE.with(|a| a.borrow_mut().retain(|r| r.request_status() == UrlrequestStatus::IO_PENDING));
             let (done, result) = {
                 let mut st = self.state.borrow_mut();
                 let done = st.done.take();
@@ -460,7 +551,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     fn signed(key: &SigningKey, version: &str, platform: &str, url: &str, sha: &str) -> String {
-        let sig = key.sign(signed_message(version, platform, url, sha).as_bytes());
+        let sig = key.sign(signed_message_for(Kind::App, version, platform, url, sha).as_bytes());
         let hex: String = sig.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
         format!("version={version}\n{platform}.url={url}\n{platform}.sha256={sha}\n{platform}.signature={hex}\n")
     }

@@ -38,13 +38,26 @@ pub fn dark_mode() -> bool {
         .is_some_and(|v| v.trim() == "0x0")
 }
 
-/// Opens Windows' Default apps page for Bare. Windows doesn't let apps make themselves the
-/// default; the user confirms there.
+/// Opens Windows' Default apps settings (Bare's own page where Windows supports that). Windows
+/// doesn't let apps make themselves the default; the user confirms there.
 pub fn open_default_apps_settings() {
     #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("explorer.exe").arg("ms-settings:defaultapps?registeredAppUser=Bare").spawn();
-    }
+    shell_open("ms-settings:defaultapps?registeredAppUser=Bare");
+}
+
+/// Opens a link or file the way the Windows shell does (`ms-settings:` links included;
+/// `explorer.exe <link>` would open a File Explorer window instead).
+#[cfg(windows)]
+fn shell_open(target: &str) -> bool {
+    use windows_sys::Win32::{UI::Shell::ShellExecuteW, UI::WindowsAndMessaging::SW_SHOWNORMAL};
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (verb, file) = (wide("open"), wide(target));
+    // SAFETY: both strings are NUL-terminated and outlive the call; the rest may be null.
+    let result = unsafe {
+        ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+    };
+    // Success is any value above 32.
+    result as isize > 32
 }
 
 /// Reads a string registry value with `reg query` (Windows only).

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use cef::*;
 
-use crate::{block, bookmarks, handlers, history, network, passwords, permissions, settings, system, ui, update};
+use crate::{block, bookmarks, engine, handlers, history, network, passwords, permissions, settings, system, ui, update};
 
 /// This process is a private window (nothing about browsing is saved).
 pub static PRIVATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -41,6 +41,7 @@ pub fn run(args: &args::Args, sandbox_info: *mut u8) -> i32 {
     bookmarks::init(&root);
     passwords::init(&root);
     update::init(&root);
+    engine::init();
 
     // A private window runs as its own Bare process with a throwaway Chromium folder, so it
     // never hands off to (or shares anything with) an already open normal window.
