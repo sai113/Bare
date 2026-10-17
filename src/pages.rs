@@ -291,6 +291,8 @@ input[type=text]:focus{outline:none;border-color:var(--accent)}.notice{color:var
 const SCRIPT_COMMON: &str = r#"
 const A=(name,params)=>{location.href=PREFIX+name+(params?'?'+new URLSearchParams(params):'')};
 const el=(tag,props,...kids)=>{const e=document.createElement(tag);Object.assign(e,props||{});for(const k of kids)if(k!=null)e.append(k);return e};
+// A link only for web pages and local files: never a javascript: bookmarklet on a Bare page.
+const link=(url,props)=>el('a',Object.assign(props,/^(https?|file):/i.test(url)?{href:url}:{}));
 const size=n=>n<1024?n+' B':n<1048576?(n/1024).toFixed(0)+' KB':n<1073741824?(n/1048576).toFixed(1)+' MB':(n/1073741824).toFixed(2)+' GB';
 "#;
 
@@ -304,9 +306,9 @@ function render(s){
     const d=new Date(e.time*1000);
     const label=d.toLocaleDateString(undefined,{weekday:'long',year:'numeric',month:'long',day:'numeric'});
     if(label!==day){day=label;list.append(el('div',{className:'day',textContent:label}))}
-    const link=el('a',{href:e.url,className:'name',textContent:e.title||e.url,title:e.url});
+    const entry=link(e.url,{className:'name',textContent:e.title||e.url,title:e.url});
     list.append(el('div',{className:'row'},el('div',{className:'sub time',textContent:d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}),
-      el('div',{className:'grow'},link,el('div',{className:'sub',textContent:e.url})),
+      el('div',{className:'grow'},entry,el('div',{className:'sub',textContent:e.url})),
       el('button',{textContent:'Remove',onclick:()=>A('hist-delete',{url:e.url})})));
   }
 }
@@ -325,7 +327,7 @@ function render(s){
   for(const b of [...s.items].sort((a,b)=>a.folder.localeCompare(b.folder))){
     if(b.folder!==folder){folder=b.folder;list.append(el('div',{className:'day',textContent:folder||'Bookmarks bar'}))}
     list.append(el('div',{className:'row'},
-      el('div',{className:'grow'},el('a',{href:b.url,className:'name',textContent:b.title||b.url,title:b.url}),el('div',{className:'sub',textContent:b.url})),
+      el('div',{className:'grow'},link(b.url,{className:'name',textContent:b.title||b.url,title:b.url}),el('div',{className:'sub',textContent:b.url})),
       el('button',{textContent:'Rename',onclick:()=>{const t=prompt('Name',b.title);if(t!=null&&t.trim())A('bm-rename',{url:b.url,title:t})}}),
       el('button',{className:'danger',textContent:'Delete',onclick:()=>A('bm-delete',{url:b.url})})));
   }

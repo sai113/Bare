@@ -2,6 +2,15 @@
 
 Each section becomes the notes of that version's GitHub release (`cargo xtask release` copies it into `dist/release-notes.md`). Write for people using Bare: what they'll notice, not how it was built.
 
+## 0.9.0
+
+- **Security fixes:**
+  - A website could open your local files, or a fake "sign in" page made from a `data:` address, in a new tab through a pop-up or a link that opens in a new tab. Pop-ups and new-tab links now only open websites.
+  - Clicking a bookmarklet (a `javascript:` bookmark) while a Bare page such as Settings was open would have run it inside that page, where it could change Bare's settings. Bookmarklets now only run on websites.
+  - Opening a download now uses Windows' standard way of opening files, so an unusual file name can't confuse it.
+- **Site menu:** click **🔒** at the left of the address bar (**⚠** on sites without HTTPS) to see whether the connection is secure, **clear that site's cookies and site data** (it reloads signed out), or turn ad blocking off for it.
+- **Tabs are easier to tell apart:** each tab now has its own shaded background with space between tabs, and the current tab is highlighted.
+
 ## 0.8.0
 
 - **🏠 Home button** next to reload (or Alt+Home): goes to your search engine's home page.

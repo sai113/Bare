@@ -253,7 +253,9 @@ wrap_life_span_handler! {
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
             let url = text(target_url);
-            ui::defer(move |ui| ui.open(&url));
+            if url::popup_allowed(&url) {
+                ui::defer(move |ui| ui.open(&url));
+            }
             1
         }
 

@@ -48,7 +48,7 @@ pub fn open_default_apps_settings() {
 /// Opens a link or file the way the Windows shell does (`ms-settings:` links included;
 /// `explorer.exe <link>` would open a File Explorer window instead).
 #[cfg(windows)]
-fn shell_open(target: &str) -> bool {
+pub fn shell_open(target: &str) -> bool {
     use windows_sys::Win32::{UI::Shell::ShellExecuteW, UI::WindowsAndMessaging::SW_SHOWNORMAL};
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
     let (verb, file) = (wide("open"), wide(target));

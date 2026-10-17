@@ -291,7 +291,7 @@ pub fn apply_if_staged() {
             .iter()
             .map(|n| {
                 let p = app.join(n);
-                format!("if %rc% lss 8 if exist \"{p}\\*\" (rmdir /S /Q \"{p}\") else (del /F /Q \"{p}\" 2>nul)\r\n", p = p.display())
+                format!("if %rc% lss 8 if exist \"{p}\\*\" (rmdir /S /Q \"{p}\") else (del /F /Q \"{p}\" 2>nul)\r\n", p = cmd_path(&p))
             })
             .collect();
         // Waits for Bare to exit, copies the update (robocopy retries while Chromium's child
@@ -306,15 +306,15 @@ pub fn apply_if_staged() {
              if %rc% geq 8 (echo copy failed: %rc% >> \"{l}\") else (rmdir /S /Q \"{s}\" & del /Q \"{m0}\" \"{m1}\" \"{m2}\" 2>nul & echo done >> \"{l}\")\r\n\
              reg query \"{k}\" >nul 2>&1 && reg add \"{k}\" /v DisplayVersion /d \"{version}\" /f >nul 2>&1\r\n\
              {relaunch}del \"%~f0\"\r\n",
-            s = staging.display(),
-            a = app.display(),
-            l = log.display(),
-            m0 = markers[0].display(),
-            m1 = markers[1].display(),
-            m2 = markers[2].display(),
+            s = cmd_path(&staging),
+            a = cmd_path(&app),
+            l = cmd_path(&log),
+            m0 = cmd_path(&markers[0]),
+            m1 = cmd_path(&markers[1]),
+            m2 = cmd_path(&markers[2]),
             // Installed with BareSetup.exe: keep "Settings -> Apps" showing the right version.
             k = format!(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{{{INSTALLER_APP_ID}}}_is1"),
-            relaunch = if relaunch { format!("start \"\" \"{}\"\r\n", app.join("Bare.exe").display()) } else { String::new() },
+            relaunch = if relaunch { format!("start \"\" \"{}\"\r\n", cmd_path(&app.join("Bare.exe"))) } else { String::new() },
         );
         if fs::write(&script, text).is_ok() {
             spawn_detached(Command::new("cmd").arg("/c").arg(&script));
@@ -335,6 +335,12 @@ pub fn apply_if_staged() {
             spawn_detached(Command::new("sh").arg(&script));
         }
     }
+}
+
+/// A path for a `.cmd` script: `%` doubled, so a folder name like `50%off` isn't read as a
+/// variable. (Windows paths can't contain quotes, so quoting them is enough otherwise.)
+fn cmd_path(path: &Path) -> String {
+    path.display().to_string().replace('%', "%%")
 }
 
 fn spawn_detached(cmd: &mut Command) {
@@ -577,6 +583,11 @@ mod tests {
         let http = signed(&key, "1.2.3", "windows-x86_64", "http://example.test/Bare.zip", &sha);
         assert!(parse_manifest(&http, "windows-x86_64", &public).is_err());
         assert!(parse_manifest(&text, "windows-x86_64", &None).is_err());
+    }
+
+    #[test]
+    fn script_paths() {
+        assert_eq!(cmd_path(Path::new(r"C:\Users\50%off\Bare")), r"C:\Users\50%%off\Bare");
     }
 
     #[test]

@@ -20,7 +20,11 @@ use crate::{
 };
 
 const ICON: &[u8] = include_bytes!("../assets/bare.png");
-const ACTIVE_TAB: u32 = 0x40808080; // translucent grey, readable in light and dark themes
+// Tab cards: translucent greys, readable in light and dark themes.
+const TAB_BACKGROUND: u32 = 0x1C808080;
+const ACTIVE_TAB: u32 = 0x58A0A0A0;
+/// Space between tabs.
+const TAB_GAP: i32 = 6;
 
 type Job = Box<dyn FnOnce(&mut Ui)>;
 
@@ -178,6 +182,8 @@ enum Action {
     Reload,
     /// 🏠: the search engine's home page in the current tab.
     Home,
+    /// 🔒 / ⚠ before the address: the site menu (connection, clear site data, blocking).
+    SiteInfo,
     Back,
     Forward,
     DevTools,
@@ -338,6 +344,8 @@ struct Tab {
     loading: bool,
     can_back: bool,
     can_forward: bool,
+    /// Empty space after the tab, separating it from the next one.
+    gap: LabelButton,
     button: LabelButton,
     /// 🔊 while the tab plays sound, 🔇 while it's muted (click to toggle).
     sound: LabelButton,
@@ -465,6 +473,10 @@ pub struct Ui {
     find_text: String,
     /// ☆ / ★: bookmark the current page.
     star: LabelButton,
+    /// 🔒 / ⚠: this site's connection and settings (web pages only).
+    site: LabelButton,
+    /// Shows "✓ Cleared" there until this time, after clearing a site's data.
+    site_cleared_until: Option<std::time::Instant>,
     /// 📖: open or leave reader view (shown on pages that look like articles).
     reader: LabelButton,
     /// 🔑: fill a saved login (shown on sites with saved logins).
@@ -547,7 +559,7 @@ impl Ui {
             ..Default::default()
         }));
 
-        let (strip, _) = row(2);
+        let (strip, _) = row(0);
         let overflow = button("▾", Action::TabMenu, "All tabs");
         View::from(&overflow).set_visible(0);
         add(&strip, &overflow);
@@ -558,6 +570,8 @@ impl Ui {
         let forward = button("→", Action::Forward, "Forward (Alt+Right)");
         let reload = button("↻", Action::Reload, "Reload (F5)");
         let home = button("🏠", Action::Home, "Home: your search engine (Alt+Home)");
+        let site = button("🔒", Action::SiteInfo, "Site information and settings");
+        View::from(&site).set_visible(0);
         let address = textfield_create(Some(&mut Address::new())).expect("textfield");
         let star = button("☆", Action::ToggleBookmark, "Bookmark this page (Ctrl+D)");
         let reader = button("📖", Action::Reader, "Reader view (F9)");
@@ -577,6 +591,7 @@ impl Ui {
             View::from(&forward),
             View::from(&reload),
             View::from(&home),
+            View::from(&site),
             View::from(&address),
             View::from(&key),
             View::from(&reader),
@@ -707,6 +722,8 @@ impl Ui {
             find_count,
             find_text: String::new(),
             star,
+            site,
+            site_cleared_until: None,
             reader,
             key,
             menu_logins: Vec::new(),
@@ -761,11 +778,17 @@ impl Ui {
         let sound = button("🔊", Action::ToggleMute(id), "Mute tab");
         View::from(&sound).set_visible(0);
         let close = button("✕", Action::Close(id), "Close tab (Ctrl+W)");
-        // Tab k's label, 🔊 and ✕ sit at strip positions 3k, 3k+1 and 3k+2, before "▾" and "+".
-        let at = 3 * self.tabs.len() as c_int;
-        self.strip.add_child_view_at(Some(&mut View::from(&label)), at);
-        self.strip.add_child_view_at(Some(&mut View::from(&sound)), at + 1);
-        self.strip.add_child_view_at(Some(&mut View::from(&close)), at + 2);
+        label.set_horizontal_alignment(HorizontalAlignment::LEFT);
+        // A tab is its title, 🔊 and ✕ on one shaded background, then a gap. Tab k's views are
+        // strip positions 4k to 4k+3, before "▾" and "+".
+        let gap = self::label("");
+        gap.set_minimum_size(Some(&Size { width: TAB_GAP, height: 0 }));
+        gap.set_maximum_size(Some(&Size { width: TAB_GAP, height: 100 }));
+        let at = 4 * self.tabs.len() as c_int;
+        for (i, v) in [View::from(&label), View::from(&sound), View::from(&close), View::from(&gap)].into_iter().enumerate() {
+            let mut v = v;
+            self.strip.add_child_view_at(Some(&mut v), at + i as c_int);
+        }
 
         self.close_find();
         if let Some(old) = self.tabs.get(self.active) {
@@ -780,6 +803,7 @@ impl Ui {
             loading: true,
             can_back: false,
             can_forward: false,
+            gap,
             button: label,
             sound,
             close,
@@ -846,9 +870,9 @@ impl Ui {
         for request in tab.prompts.drain(..) {
             request.answer(false);
         }
-        self.strip.remove_child_view(Some(&mut View::from(&tab.button)));
-        self.strip.remove_child_view(Some(&mut View::from(&tab.sound)));
-        self.strip.remove_child_view(Some(&mut View::from(&tab.close)));
+        for mut v in [View::from(&tab.button), View::from(&tab.sound), View::from(&tab.close), View::from(&tab.gap)] {
+            self.strip.remove_child_view(Some(&mut v));
+        }
         if let Some(host) = tab.browser.as_ref().and_then(|b| b.host()) {
             host.close_browser(1);
         }
@@ -877,6 +901,7 @@ impl Ui {
             Action::NextTab if n > 0 => self.select((self.active + 1) % n),
             Action::PrevTab if n > 0 => self.select((self.active + n - 1) % n),
             Action::FocusAddress => self.focus_address(),
+            Action::SiteInfo => self.show_site_menu(),
             Action::Home => {
                 let home = settings::get().search.home();
                 self.load_in_active(home);
@@ -1016,6 +1041,86 @@ impl Ui {
             host.set_audio_muted(t.muted as c_int);
         }
         self.layout_tabs();
+    }
+
+    // ---- site menu (🔒 / ⚠ before the address) ----
+
+    /// The active tab's address, if it's a web page (not a Bare page, reader view or blank).
+    fn active_web_url(&self) -> Option<&str> {
+        let t = self.tabs.get(self.active)?;
+        let web = t.page.is_none() && !t.in_reader && (t.url.starts_with("https://") || t.url.starts_with("http://"));
+        web.then_some(t.url.as_str())
+    }
+
+    fn show_site_menu(&mut self) {
+        let Some(url) = self.active_web_url().map(String::from) else { return };
+        let Some(menu) = menu_model_create(Some(&mut SiteMenu::new())) else { return };
+        let host = url::host(&url).unwrap_or("").to_string();
+        let text = |s: &str| CefString::from(s);
+        // Not clickable: what the site is, and whether the connection is private.
+        menu.add_item(SITE_MENU_BASE + 90, Some(&text(&host)));
+        let connection = if url.starts_with("https://") {
+            "🔒 Connection is secure"
+        } else {
+            "⚠ Not secure: this site doesn\u{2019}t use HTTPS"
+        };
+        menu.add_item(SITE_MENU_BASE + 91, Some(&text(connection)));
+        menu.set_enabled(SITE_MENU_BASE + 90, 0);
+        menu.set_enabled(SITE_MENU_BASE + 91, 0);
+        menu.add_separator();
+        menu.add_item(SITE_MENU_BASE + SITE_CLEAR, Some(&text("Clear cookies and site data")));
+        let blocking = {
+            let s = settings::get();
+            s.blocking.then(|| !s.allowed_sites.contains(&host.to_ascii_lowercase()))
+        };
+        match blocking {
+            Some(true) => menu.add_item(SITE_MENU_BASE + SITE_BLOCKING, Some(&text("Turn off ad blocking for this site"))),
+            Some(false) => menu.add_item(SITE_MENU_BASE + SITE_BLOCKING, Some(&text("Turn ad blocking back on for this site"))),
+            None => 0,
+        };
+        if passwords::origin(&url).is_some_and(|o| passwords::has_logins(&o)) {
+            menu.add_item(SITE_MENU_BASE + SITE_PASSWORDS, Some(&text("Saved passwords\u{2026}")));
+        }
+        let b = View::from(&self.site).bounds_in_screen();
+        let mut menu = menu;
+        self.window.show_menu(Some(&mut menu), Some(&Point { x: b.x, y: b.y + b.height }), MenuAnchorPosition::TOPLEFT);
+    }
+
+    pub fn site_command(&mut self, command: c_int) {
+        match command {
+            SITE_CLEAR => self.clear_site_data(),
+            SITE_BLOCKING => self.toggle_shield(),
+            SITE_PASSWORDS => self.open_page(Page::Passwords),
+            _ => {}
+        }
+    }
+
+    /// Deletes the active site's cookies (those it can read: its own host and parent
+    /// domains) and its stored data (local storage, IndexedDB, service workers and their
+    /// caches), then reloads the page fresh from the network.
+    fn clear_site_data(&mut self) {
+        let Some(url) = self.active_web_url().map(String::from) else { return };
+        let (Some(host), Some(origin)) = (url::host(&url).map(str::to_ascii_lowercase), passwords::origin(&url)) else { return };
+        let Some(t) = self.tabs.get(self.active) else { return };
+        let (id, browser) = (t.id, t.browser.clone());
+        if let Some(cookies) = self.context.as_ref().and_then(|c| c.cookie_manager(None)) {
+            cookies.visit_all_cookies(Some(&mut SiteCookies::new(host)));
+        }
+        if let (Some(h), Some(params)) = (browser.as_ref().and_then(|b| b.host()), dictionary_value_create()) {
+            params.set_string(Some(&CefString::from("origin")), Some(&CefString::from(origin.as_str())));
+            params.set_string(Some(&CefString::from("storageTypes")), Some(&CefString::from("all")));
+            let mut params = params;
+            h.execute_dev_tools_method(0, Some(&CefString::from("Storage.clearDataForOrigin")), Some(&mut params));
+        }
+        self.site_cleared_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(2500));
+        self.refresh();
+        // Cookie deletion finishes in the background: reload (bypassing the cache) a moment later.
+        defer_after(500, move |ui| {
+            if let Some(b) = ui.tabs.iter().find(|t| t.id == id).and_then(|t| t.browser.as_ref()) {
+                b.reload_ignore_cache();
+            }
+        });
+        defer_after(2600, |ui| ui.refresh());
     }
 
     /// Opens reader view for the active tab, or leaves it (back to the original page).
@@ -1342,6 +1447,14 @@ impl Ui {
     fn load_in_active(&mut self, target: &str) {
         if let Some(page) = Page::from_address(target) {
             return self.open_page(page);
+        }
+        // Bookmarks can hold anything. `data:` pages are never loaded this way, and
+        // bookmarklets (`javascript:`) never run on Bare's own pages or in reader view, where
+        // they could act on Bare's settings.
+        let scheme = target.trim_start().to_ascii_lowercase();
+        let own_page = self.tabs.get(self.active).is_some_and(|t| t.page.is_some() || t.in_reader);
+        if scheme.starts_with("data:") || (scheme.starts_with("javascript:") && own_page) {
+            return;
         }
         if let Some(frame) = self.tabs.get(self.active).and_then(|t| t.browser.as_ref()).and_then(|b| b.main_frame()) {
             frame.load_url(Some(&CefString::from(target)));
@@ -1723,14 +1836,22 @@ impl Ui {
             let show_close = visible && (active || width >= TAB_CLOSE_MIN_WIDTH);
             // 🔊 / 🔇 while the tab plays sound or is muted (on visible tabs wide enough for it).
             let show_sound = visible && (t.muted || !t.audible.is_empty()) && (active || width >= TAB_CLOSE_MIN_WIDTH);
-            let label_width = width - if show_close { TAB_CLOSE_WIDTH } else { 0 } - if show_sound { TAB_CLOSE_WIDTH } else { 0 };
+            // Each tab's slot is `width` wide: title, 🔊 and ✕ on one shaded "card", then a gap.
+            let label_width = width
+                - TAB_GAP
+                - if show_close { TAB_CLOSE_WIDTH } else { 0 }
+                - if show_sound { TAB_CLOSE_WIDTH } else { 0 };
             let chars = ((label_width - 20) / TAB_CHAR_WIDTH).max(2) as usize;
             t.button.set_text(Some(&CefString::from(t.label(chars).as_str())));
             t.button.set_minimum_size(Some(&Size { width: label_width, height: 0 }));
             t.button.set_maximum_size(Some(&Size { width: label_width, height: 100 }));
             Button::from(&t.button).set_tooltip_text(Some(&CefString::from(self.tab_tooltip(t).as_str())));
-            View::from(&t.button).set_background_color(if active { ACTIVE_TAB } else { 0 });
+            let shade = if active { ACTIVE_TAB } else { TAB_BACKGROUND };
+            for v in [View::from(&t.button), View::from(&t.sound), View::from(&t.close)] {
+                v.set_background_color(shade);
+            }
             View::from(&t.button).set_visible(visible as _);
+            View::from(&t.gap).set_visible(visible as _);
             View::from(&t.close).set_visible(show_close as _);
             View::from(&t.sound).set_visible(show_sound as _);
             t.sound.set_text(Some(&CefString::from(if t.muted { "🔇" } else { "🔊" })));
@@ -1795,11 +1916,11 @@ Memory usage: {}", memory::format_bytes(bytes)));
         }
         self.tabs.swap(i, j);
         self.active = j;
-        // Tab k's label and ✕ sit at strip positions 2k and 2k+1.
+        // Tab k's views are strip positions 4k to 4k+3.
         for (k, t) in self.tabs.iter().enumerate() {
-            self.strip.reorder_child_view(Some(&mut View::from(&t.button)), 3 * k as c_int);
-            self.strip.reorder_child_view(Some(&mut View::from(&t.sound)), 3 * k as c_int + 1);
-            self.strip.reorder_child_view(Some(&mut View::from(&t.close)), 3 * k as c_int + 2);
+            for (i, mut v) in [View::from(&t.button), View::from(&t.sound), View::from(&t.close), View::from(&t.gap)].into_iter().enumerate() {
+                self.strip.reorder_child_view(Some(&mut v), (4 * k + i) as c_int);
+            }
         }
         self.refresh();
     }
@@ -1860,6 +1981,17 @@ Memory usage: {}", memory::format_bytes(bytes)));
         // 🔑 on sites with saved logins.
         let has_logins = self.active_origin().is_some_and(|o| passwords::has_logins(&o));
         View::from(&self.key).set_visible(has_logins as _);
+
+        // 🔒 / ⚠ before the address, on web pages.
+        let site = self.active_web_url().map(|u| u.starts_with("https://"));
+        View::from(&self.site).set_visible(site.is_some() as _);
+        let cleared = self.site_cleared_until.is_some_and(|t| std::time::Instant::now() < t);
+        self.site.set_text(Some(&CefString::from(if cleared { "✓ Cleared" } else if site == Some(false) { "⚠" } else { "🔒" })));
+        Button::from(&self.site).set_tooltip_text(Some(&CefString::from(if site == Some(false) {
+            "Not secure: this site doesn{2019}t use HTTPS. Site settings"
+        } else {
+            "Connection is secure. Site settings: clear cookies and site data, ad blocking"
+        })));
 
         // ☆ / ★ for web pages only.
         let (can_bookmark, bookmarked) = match self.tabs.get(self.active) {
@@ -2158,6 +2290,41 @@ wrap_textfield_delegate! {
 
 /// Menu command ids for a bookmarks-bar folder are BOOKMARK_MENU_BASE + index into `menu_urls`.
 const BOOKMARK_MENU_BASE: c_int = 5000;
+/// Menu command ids for the site menu (🔒 / ⚠): SITE_MENU_BASE + one of these.
+const SITE_MENU_BASE: c_int = 7600;
+const SITE_CLEAR: c_int = 0;
+const SITE_BLOCKING: c_int = 1;
+const SITE_PASSWORDS: c_int = 2;
+
+wrap_menu_model_delegate! {
+    struct SiteMenu {}
+
+    impl MenuModelDelegate {
+        fn execute_command(&self, _menu_model: Option<&mut MenuModel>, command_id: c_int, _event_flags: EventFlags) {
+            let command = command_id - SITE_MENU_BASE;
+            defer(move |ui| ui.site_command(command));
+        }
+    }
+}
+
+// Deletes the cookies a site can read (its own host's and its parent domains').
+wrap_cookie_visitor! {
+    struct SiteCookies {
+        host: String,
+    }
+
+    impl CookieVisitor {
+        fn visit(&self, cookie: Option<&Cookie>, _count: c_int, _total: c_int, delete_cookie: Option<&mut c_int>) -> c_int {
+            if let (Some(c), Some(delete)) = (cookie, delete_cookie) {
+                if url::cookie_applies(&self.host, &c.domain.to_string()) {
+                    *delete = 1;
+                }
+            }
+            1
+        }
+    }
+}
+
 /// Menu command ids for the 🔑 menu are LOGIN_MENU_BASE + index into `menu_logins`.
 const LOGIN_MENU_BASE: c_int = 7000;
 /// Sub-menu ids (folders inside the "»" menu).

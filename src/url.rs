@@ -61,6 +61,26 @@ pub fn is_local(host: &str) -> bool {
     host == "localhost" || host.ends_with(".localhost") || host == "127.0.0.1" || host == "[::1]"
 }
 
+/// Does a cookie for `cookie_domain` ("example.com", ".example.com", "www.example.com") reach
+/// pages on `host`? True for the host itself and its parent domains.
+pub fn cookie_applies(host: &str, cookie_domain: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let domain = cookie_domain.trim_start_matches('.').to_ascii_lowercase();
+    !domain.is_empty() && (host == domain || host.ends_with(&format!(".{domain}")))
+}
+
+/// Pop-ups and `target=_blank` links open as tabs that Bare loads itself, which skips
+/// Chromium's checks on where a page may send you. So only web addresses, blank pages, `blob:`
+/// links (generated files) and `view-source:` of web pages (the context menu's View source) are
+/// allowed: never local files, `data:` pages (a phishing trick Chrome blocks), `javascript:` or
+/// browser-internal pages.
+pub fn popup_allowed(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    url.is_empty()
+        || url == "about:blank"
+        || ["https://", "http://", "blob:https://", "blob:http://", "view-source:https://", "view-source:http://"].iter().any(|p| url.starts_with(p))
+}
+
 /// HTTPS-only mode: returns the https:// version of a plain-http URL, unless the host is
 /// local or the user explicitly allowed it this session.
 pub fn upgrade(url: &str, allowed: &HashSet<String>) -> Option<String> {
@@ -144,6 +164,27 @@ pub fn query(url: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookies_for_a_site() {
+        assert!(cookie_applies("www.example.com", ".example.com"));
+        assert!(cookie_applies("www.example.com", "www.example.com"));
+        assert!(cookie_applies("WWW.Example.com", "example.com"));
+        assert!(!cookie_applies("www.example.com", "accounts.example.com"));
+        assert!(!cookie_applies("www.example.com", "ample.com"));
+        assert!(!cookie_applies("example.com", "other.com"));
+        assert!(!cookie_applies("example.com", "."));
+    }
+
+    #[test]
+    fn popups() {
+        for ok in ["https://a.test/x", "HTTP://a.test", "", "about:blank", "blob:https://a.test/1234"] {
+            assert!(popup_allowed(ok), "{ok}");
+        }
+        for bad in ["file:///C:/Users/me/secret.txt", "data:text/html,<h1>Bank login</h1>", "javascript:alert(1)", " data:,x", "chrome://settings", "view-source:file:///C:/x", "blob:null/123"] {
+            assert!(!popup_allowed(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn resolves_urls_and_searches() {

@@ -163,15 +163,22 @@ fn finished_path(id: u32) -> Option<String> {
 }
 
 fn open_with_system(path: &str, reveal: bool) {
-    let result = if cfg!(windows) {
+    #[cfg(windows)]
+    {
         if reveal {
-            Command::new("explorer.exe").arg(format!("/select,{path}")).spawn()
+            // The path quoted as Explorer expects it, so a comma in a file name can't be read
+            // as another Explorer switch. (Windows file names can't contain quotes.)
+            use std::os::windows::process::CommandExt;
+            let _ = Command::new("explorer.exe").raw_arg(format!("/select,\"{path}\"")).spawn();
         } else {
-            // `explorer <file>` opens it with the associated app; Windows applies its usual
-            // SmartScreen / Mark-of-the-Web checks for downloaded programs.
-            Command::new("explorer.exe").arg(path).spawn()
+            // Opened the way double-clicking it would, with Windows' usual SmartScreen /
+            // Mark-of-the-Web checks for downloaded programs.
+            crate::system::shell_open(path);
         }
-    } else if cfg!(target_os = "macos") {
+        return;
+    }
+    #[allow(unreachable_code)]
+    let result = if cfg!(target_os = "macos") {
         let mut c = Command::new("open");
         if reveal {
             c.arg("-R");
