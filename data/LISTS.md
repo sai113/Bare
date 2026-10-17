@@ -10,6 +10,7 @@ Bare's ad and tracker blocker loads these lists from this folder. Refresh them w
 | `bare-extra.txt` | Analytics and device telemetry the big lists miss | Bare (hand-curated) | MIT |
 | `fanboy-social.txt` | Optional: social media buttons, embeds, trackers | [Fanboy's Social Blocking List](https://easylist.to) | GPLv3 or CC BY-SA 3.0 |
 | `bare-social.txt` | Optional: social networks' scripts and widgets on other sites | Bare (hand-curated) | MIT |
+| `bare-cookies.txt` | Optional: cookie-consent managers (Cookiebot, TrustArc, Didomi, Sourcepoint, Usercentrics) | Bare (hand-curated) | MIT |
 | `easylist-cookie.txt` | Optional: cookie-consent banners | [EasyList Cookie List](https://easylist.to) | CC BY 3.0 |
 | `blocklist.txt` | Ad, tracking and malware domains | [StevenBlack unified hosts](https://github.com/StevenBlack/hosts) | MIT |
 

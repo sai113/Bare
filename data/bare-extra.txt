@@ -19,3 +19,23 @@
 ||amoeba.web.roku.com^
 ||tvinteractive.tv^
 ||settings-win.data.microsoft.com^
+!
+! YouTube ad, tracking and telemetry endpoints (videos themselves come from
+! rr*.googlevideo.com and keep playing). Blocking s.youtube.com also stops YouTube
+! recording watch history.
+||s.youtube.com^
+||redirector.googlevideo.com^
+||youtubei.googleapis.com^
+||tagmanager.google.com^
+!
+! Link click tracking, retargeting pixels
+||bnc.lt^
+||vk.com/rtrg
+!
+! Instagram's API when other sites call it (instagram.com itself keeps working)
+||i.instagram.com^$third-party
+||graph.instagram.com^$third-party
+!
+! Malware and unwanted software
+||2giga.link^
+||greatis.com^

@@ -122,6 +122,7 @@ fn package() -> Result<()> {
         "fanboy-social.txt",
         "bare-social.txt",
         "easylist-cookie.txt",
+        "bare-cookies.txt",
         "LISTS.md",
     ] {
         fs::copy(root.join("data").join(list), data.join(list))?;
@@ -233,6 +234,8 @@ fn release() -> Result<()> {
     }
     let root = root();
     let key = signing_key(&root)?;
+    // Checked before building anything: every release needs its notes.
+    let notes = release_notes(&root, &version(&root)?)?;
 
     package()?;
     let version = version(&root)?;
@@ -276,7 +279,10 @@ fn release() -> Result<()> {
     lines.push(format!("{platform}.signature={signature}"));
     fs::write(&manifest_path, lines.join("\n") + "\n")?;
 
+    let notes_path = dist.join("release-notes.md");
+    fs::write(&notes_path, &notes)?;
     println!("Release {version} for {platform}:");
+    println!("  paste {} into the release description", notes_path.display());
     println!("  upload {} to {url}", archive.display());
     println!("  publish {} at $BARE_UPDATE_URL", manifest_path.display());
     // Carry the approved engine forward, so engines.txt stays at the latest release's address.
@@ -293,6 +299,42 @@ fn release() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The GitHub release description for `version`: its section of CHANGELOG.md, how to get it,
+/// and a link comparing it with the previous version.
+fn release_notes(root: &Path, version: &str) -> Result<String> {
+    let changelog = fs::read_to_string(root.join("CHANGELOG.md")).map_err(|_| "CHANGELOG.md is missing")?;
+    let heading = |l: &str| l.strip_prefix("## ").map(|v| v.split_whitespace().next().unwrap_or("").to_string());
+    let mut lines = changelog.lines().skip_while(|l| heading(l).as_deref() != Some(version));
+    if lines.next().is_none() {
+        return Err(format!("CHANGELOG.md has no \"## {version}\" section: write what's new in {version} first").into());
+    }
+    let mut section = Vec::new();
+    let mut previous = None;
+    for line in lines {
+        if let Some(v) = heading(line) {
+            previous = Some(v);
+            break;
+        }
+        section.push(line);
+    }
+    let section = section.join("\n").trim().to_string();
+    if section.is_empty() {
+        return Err(format!("the \"## {version}\" section of CHANGELOG.md is empty").into());
+    }
+    let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+    let repo = manifest
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("repository = \"")?.strip_suffix('"').map(String::from))
+        .ok_or("no repository in Cargo.toml")?;
+    let mut notes = format!(
+        "{section}\n\n**New to Bare?** Download `BareSetup-{version}.exe` below. **Already using it?** Bare updates itself within a day, or right away from Settings \u{2192} About \u{2192} Check now.\n"
+    );
+    if let Some(previous) = previous {
+        notes.push_str(&format!("\n**Full Changelog**: {repo}/compare/v{previous}...v{version}\n"));
+    }
+    Ok(notes)
 }
 
 /// The update-signing key, checked against the public key built into Bare.

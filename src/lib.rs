@@ -4,6 +4,8 @@
 #[cfg(all(windows, feature = "sandbox"))]
 mod app;
 #[cfg(all(windows, feature = "sandbox"))]
+mod audio;
+#[cfg(all(windows, feature = "sandbox"))]
 mod block;
 #[cfg(all(windows, feature = "sandbox"))]
 mod bookmarks;
@@ -15,6 +17,8 @@ mod engine;
 mod engine_files;
 #[cfg(all(windows, feature = "sandbox"))]
 mod handlers;
+#[cfg(all(windows, feature = "sandbox"))]
+mod hello;
 #[cfg(all(windows, feature = "sandbox"))]
 mod history;
 #[cfg(all(windows, feature = "sandbox"))]

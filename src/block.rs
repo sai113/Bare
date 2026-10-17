@@ -33,7 +33,7 @@ const LISTS: [(&str, FilterFormat); 5] = [
 ];
 /// Optional lists, switched on in Settings.
 const SOCIAL_LISTS: [&str; 2] = ["fanboy-social.txt", "bare-social.txt"];
-const COOKIE_LIST: &str = "easylist-cookie.txt";
+const COOKIE_LISTS: [&str; 2] = ["easylist-cookie.txt", "bare-cookies.txt"];
 
 /// Which optional lists are on.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -50,7 +50,7 @@ fn list_names(extras: Extras) -> Vec<(&'static str, FilterFormat)> {
         names.extend(SOCIAL_LISTS.map(|n| (n, FilterFormat::Standard)));
     }
     if extras.cookie_banners {
-        names.push((COOKIE_LIST, FilterFormat::Standard));
+        names.extend(COOKIE_LISTS.map(|n| (n, FilterFormat::Standard)));
     }
     names
 }
@@ -276,6 +276,27 @@ mod tests {
     }
 
     #[test]
+    fn bare_lists() {
+        let dir = data_dir().expect("data folder");
+        let list = |name: &str| (fs::read_to_string(dir.join(name)).unwrap(), FilterFormat::Standard);
+        let extra = engine_from(vec![list("bare-extra.txt")]);
+        let page = "https://news.test/";
+        for url in ["https://s.youtube.com/api/stats/ads", "https://redirector.googlevideo.com/x", "https://bnc.lt/a", "https://vk.com/rtrg?p=1"] {
+            assert!(blocks(&extra, url, page, "xmlhttprequest"), "{url}");
+        }
+        // Instagram's API is blocked on other sites, never on Instagram itself.
+        assert!(blocks(&extra, "https://i.instagram.com/api/v1/x", page, "xmlhttprequest"));
+        assert!(!blocks(&extra, "https://i.instagram.com/api/v1/x", "https://www.instagram.com/", "xmlhttprequest"));
+        // The rest of vk.com is untouched.
+        assert!(!blocks(&extra, "https://vk.com/feed", page, "document"));
+
+        let cookies = engine_from(vec![list("bare-cookies.txt")]);
+        assert!(blocks(&cookies, "https://consent.cookiebot.com/uc.js", page, "script"));
+        assert!(blocks(&cookies, "https://app.usercentrics.eu/browser-ui/latest/loader.js", page, "script"));
+        assert!(!blocks(&cookies, "https://www.cookiebot.com/en/", "https://www.cookiebot.com/", "document"));
+    }
+
+    #[test]
     fn optional_social_list() {
         let fb = "https://connect.facebook.net/en_US/sdk.js";
         assert!(!blocks(&shipped_engine(Extras::default()), fb, "https://news.test/", "script"));
@@ -325,7 +346,8 @@ mod tests {
             assert!(blocks(&e, &format!("https://{host}/x"), "https://news.test/", "xmlhttprequest"), "{host}");
         }
         // Things that must keep working.
-        for url in ["https://redirector.googlevideo.com/videoplayback", "https://click.mailchimp.com/track/click"] {
+        // (YouTube's video servers; its redirector is blocked, which playback doesn't need.)
+        for url in ["https://rr3---sn-a5mekn6s.googlevideo.com/videoplayback", "https://click.mailchimp.com/track/click"] {
             assert!(!blocks(&e, url, "https://news.test/", "xmlhttprequest"), "{url}");
         }
         assert!(blocks(&e, "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js", "https://news.test/", "script"));

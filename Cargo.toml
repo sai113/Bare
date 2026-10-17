@@ -3,7 +3,7 @@ members = [".", "xtask"]
 
 [package]
 name = "bare"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "A minimal, fast, private web browser built on Chromium (CEF). No bloat."
 license = "MIT"
@@ -41,3 +41,5 @@ strip = true
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Security_Credentials_UI", "Win32_Foundation", "Win32_System_WinRT"] }
+windows-future = "0.3"

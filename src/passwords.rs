@@ -181,6 +181,81 @@ pub fn set_never(origin: &str, never: bool) {
     });
 }
 
+// ---- importing ----
+
+/// Splits CSV text into rows of fields (RFC 4180: quoted fields, `""` for a quote, line breaks
+/// inside quotes).
+pub fn parse_csv(text: &str) -> Vec<Vec<String>> {
+    let (mut rows, mut row, mut field) = (Vec::new(), Vec::new(), String::new());
+    let mut quoted = false;
+    let mut chars = text.trim_start_matches('\u{feff}').chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quoted, c) {
+            (true, '"') if chars.peek() == Some(&'"') => {
+                chars.next();
+                field.push('"');
+            }
+            (true, '"') => quoted = false,
+            (true, c) => field.push(c),
+            (false, '"') => quoted = true,
+            (false, ',') => row.push(std::mem::take(&mut field)),
+            (false, '\r') => {}
+            (false, '\n') => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            (false, c) => field.push(c),
+        }
+    }
+    if !field.is_empty() || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    rows.retain(|r: &Vec<String>| !(r.len() == 1 && r[0].trim().is_empty()));
+    rows
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Imported {
+    pub added: usize,
+    /// Rows that weren't web logins, or were already saved for that site and username.
+    pub skipped: usize,
+}
+
+/// Imports a password export (CSV) from Chrome, Edge, Brave, Firefox, Bitwarden and the like:
+/// any file with url, username and password columns. Logins already saved for a site and
+/// username are left as they are.
+pub fn import_csv(text: &str) -> Result<Imported, String> {
+    let rows = parse_csv(text);
+    let (header, rows) = rows.split_first().ok_or("the file is empty")?;
+    let column = |names: &[&str]| header.iter().position(|h| names.contains(&h.trim().to_ascii_lowercase().as_str()));
+    let url = column(&["url", "origin", "login_uri", "website", "web site", "login url"]).ok_or("it has no URL column, so it doesn't look like a password export")?;
+    let pass = column(&["password", "login_password"]).ok_or("it has no password column")?;
+    let user = column(&["username", "login_username", "user name", "user", "login", "email"]);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    Ok(with(|s| {
+        let mut result = Imported { added: 0, skipped: 0 };
+        for row in rows {
+            let get = |i: usize| row.get(i).map_or("", String::as_str);
+            let (password, username) = (get(pass), user.map_or("", get).trim());
+            let Some(origin) = origin(get(url).trim()).filter(|_| !password.is_empty() && password.len() <= 1000 && username.len() <= 500) else {
+                result.skipped += 1;
+                continue;
+            };
+            if s.vault.logins.iter().any(|l| l.origin == origin && l.username == username) {
+                result.skipped += 1;
+                continue;
+            }
+            s.vault.logins.push(Login { origin, username: username.into(), password: password.into(), saved: now });
+            result.added += 1;
+        }
+        if result.added > 0 {
+            s.save();
+        }
+        result
+    }))
+}
+
 /// A login submitted on a page, as reported by the capture script.
 #[derive(Debug, PartialEq, Deserialize)]
 pub struct Submitted {
@@ -370,6 +445,21 @@ mod tests {
         remove("https://a.test", "you");
         init(&dir);
         assert_eq!(all().len(), 1);
+
+        // Importing a Chrome export: new logins added, saved ones kept, non-web rows skipped.
+        let csv = "name,url,username,password,note\r\n\
+                   a.test,https://a.test/login,me,from-chrome,\r\n\
+                   b.test,https://b.test/,\"you, too\",\"p\"\"w\nx\",\r\n\
+                   app,android://abc@com.app/,u,p,\r\n";
+        assert_eq!(import_csv(csv), Ok(Imported { added: 1, skipped: 2 }));
+        assert_eq!(password("https://a.test", "me").as_deref(), Some("new"));
+        assert_eq!(password("https://b.test", "you, too").as_deref(), Some("p\"w\nx"));
+        assert!(import_csv("title,notes\nx,y\n").is_err());
+        // Firefox and Bitwarden name their columns differently.
+        assert_eq!(import_csv("\u{feff}\"url\",\"username\",\"password\"\n\"https://c.test\",\"c\",\"pc\"\n"), Ok(Imported { added: 1, skipped: 0 }));
+        assert_eq!(import_csv("login_uri,login_username,login_password\nhttps://d.test,d,pd\n"), Ok(Imported { added: 1, skipped: 0 }));
+        init(&dir);
+        assert_eq!(password("https://d.test", "d").as_deref(), Some("pd"));
 
         // A tampered or foreign file is ignored, not trusted.
         fs::write(dir.join("passwords.dat"), b"not a vault").unwrap();

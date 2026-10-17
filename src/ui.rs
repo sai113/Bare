@@ -6,7 +6,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     os::raw::c_int,
     rc::Rc,
 };
@@ -54,6 +54,32 @@ pub fn defer(job: impl FnOnce(&mut Ui) + 'static) {
 pub fn defer_after(ms: i64, job: impl FnOnce(&mut Ui) + 'static) {
     let job: Rc<RefCell<Option<Job>>> = Rc::new(RefCell::new(Some(Box::new(job))));
     post_delayed_task(ThreadId::UI, Some(&mut Deferred::new(job)), ms);
+}
+
+/// UI work produced on another thread.
+type SendJob = Box<dyn FnOnce(&mut Ui) + Send>;
+
+/// Runs `work` on a new thread (for things that block, like a Windows Hello prompt); the job it
+/// returns then runs on the UI thread.
+pub fn background(work: impl FnOnce() -> SendJob + Send + 'static) {
+    std::thread::spawn(move || {
+        let job = work();
+        post_task(ThreadId::UI, Some(&mut UiJob::new(std::sync::Arc::new(std::sync::Mutex::new(Some(job))))));
+    });
+}
+
+wrap_task! {
+    struct UiJob {
+        job: std::sync::Arc<std::sync::Mutex<Option<SendJob>>>,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            if let Some(job) = self.job.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                with_ui(job);
+            }
+        }
+    }
 }
 
 /// Chromium's zoom level is a power of 1.2 (level 0 = 100%, 1 = 120%, -1 ≈ 83%).
@@ -190,6 +216,8 @@ enum Action {
     Nothing,
     Select(u64),
     Close(u64),
+    /// 🔊 / 🔇 on a tab: mute or unmute it.
+    ToggleMute(u64),
 }
 
 /// Keyboard shortcuts: (action, key code, shift, ctrl, alt). Key codes are Windows VK codes,
@@ -308,6 +336,8 @@ struct Tab {
     can_back: bool,
     can_forward: bool,
     button: LabelButton,
+    /// 🔊 while the tab plays sound, 🔇 while it's muted (click to toggle).
+    sound: LabelButton,
     close: LabelButton,
     /// Set while the tab shows a built-in page (bare://downloads, bare://settings).
     page: Option<Page>,
@@ -325,6 +355,9 @@ struct Tab {
     reader: Option<(String, String)>,
     in_reader: bool,
     reader_pending: Option<String>,
+    /// Frames of the page currently playing sound, and whether the tab is muted.
+    audible: HashSet<String>,
+    muted: bool,
 }
 
 impl Tab {
@@ -439,6 +472,12 @@ pub struct Ui {
     save_bar: Panel,
     save_text: LabelButton,
     pending_login: Option<PendingLogin>,
+    /// Saved passwords can be shown without asking again until this time (after Windows
+    /// Hello), and whether a Windows Hello prompt is open.
+    reveal_until: Option<std::time::Instant>,
+    verifying: bool,
+    /// The password export (CSV) imported last, which the passwords page offers to delete.
+    imported_csv: Option<std::path::PathBuf>,
     /// The bookmarks bar, its link addresses and folder buttons/contents.
     bookmark_bar: Panel,
     bar_urls: Vec<String>,
@@ -669,6 +708,9 @@ impl Ui {
             save_bar,
             save_text,
             pending_login: None,
+            reveal_until: None,
+            verifying: false,
+            imported_csv: None,
             bookmark_bar,
             bar_urls: Vec::new(),
             bar_folders: Vec::new(),
@@ -711,11 +753,14 @@ impl Ui {
         self.column.set_flex_for_view(Some(&mut View::from(&view)), 1);
 
         let label = button("New tab", Action::Select(id), "");
+        let sound = button("🔊", Action::ToggleMute(id), "Mute tab");
+        View::from(&sound).set_visible(0);
         let close = button("✕", Action::Close(id), "Close tab (Ctrl+W)");
-        // Tab k's label and ✕ sit at strip positions 2k and 2k+1, before "▾" and "+".
-        let at = 2 * self.tabs.len() as c_int;
+        // Tab k's label, 🔊 and ✕ sit at strip positions 3k, 3k+1 and 3k+2, before "▾" and "+".
+        let at = 3 * self.tabs.len() as c_int;
         self.strip.add_child_view_at(Some(&mut View::from(&label)), at);
-        self.strip.add_child_view_at(Some(&mut View::from(&close)), at + 1);
+        self.strip.add_child_view_at(Some(&mut View::from(&sound)), at + 1);
+        self.strip.add_child_view_at(Some(&mut View::from(&close)), at + 2);
 
         self.close_find();
         if let Some(old) = self.tabs.get(self.active) {
@@ -731,6 +776,7 @@ impl Ui {
             can_back: false,
             can_forward: false,
             button: label,
+            sound,
             close,
             page: None,
             prompts: VecDeque::new(),
@@ -741,6 +787,8 @@ impl Ui {
             reader: None,
             in_reader: false,
             reader_pending: None,
+            audible: HashSet::new(),
+            muted: false,
         });
         self.active = self.tabs.len() - 1;
         Panel::from(&self.window).layout();
@@ -794,6 +842,7 @@ impl Ui {
             request.answer(false);
         }
         self.strip.remove_child_view(Some(&mut View::from(&tab.button)));
+        self.strip.remove_child_view(Some(&mut View::from(&tab.sound)));
         self.strip.remove_child_view(Some(&mut View::from(&tab.close)));
         if let Some(host) = tab.browser.as_ref().and_then(|b| b.host()) {
             host.close_browser(1);
@@ -917,11 +966,49 @@ impl Ui {
                     self.close(i);
                 }
             }
+            Action::ToggleMute(id) => self.toggle_mute(id),
             _ => {}
         }
     }
 
-    /// Turns the blocker off (or back on) for the current site, then reloads it. Remembered.
+    // ---- sound ----
+
+    /// A frame of a tab started or stopped playing sound.
+    pub fn on_audio(&mut self, browser_id: i32, frame: String, playing: bool) {
+        let Some(t) = self.tab_for_browser(browser_id) else { return };
+        let was = !t.audible.is_empty();
+        if !playing {
+            t.audible.remove(&frame);
+        } else if t.audible.len() < 64 {
+            t.audible.insert(frame);
+        }
+        if was != !t.audible.is_empty() {
+            self.layout_tabs();
+        }
+    }
+
+    /// The tab started loading a new page: nothing from the old one is playing any more.
+    pub fn on_audio_reset(&mut self, browser_id: i32) {
+        let changed = self.tab_for_browser(browser_id).is_some_and(|t| {
+            let was = !t.audible.is_empty();
+            t.audible.clear();
+            was
+        });
+        if changed {
+            self.layout_tabs();
+        }
+    }
+
+    /// 🔊 / 🔇: mutes or unmutes a tab (it stays muted on other pages until unmuted).
+    fn toggle_mute(&mut self, id: u64) {
+        let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) else { return };
+        t.muted = !t.muted;
+        if let Some(host) = t.browser.as_ref().and_then(|b| b.host()) {
+            host.set_audio_muted(t.muted as c_int);
+        }
+        self.layout_tabs();
+    }
+
     /// Opens reader view for the active tab, or leaves it (back to the original page).
     fn toggle_reader(&mut self) {
         let Some(t) = self.tabs.get_mut(self.active) else { return };
@@ -1022,6 +1109,84 @@ impl Ui {
         }
     }
 
+    /// "Show" on bare://passwords: asks Windows Hello first (then not again for a minute).
+    fn reveal_password(&mut self, browser_id: i32, origin: String, username: String) {
+        if self.reveal_until.is_some_and(|t| std::time::Instant::now() < t) {
+            return self.show_password(browser_id, &origin, &username);
+        }
+        if self.verifying {
+            return;
+        }
+        self.verifying = true;
+        let window = self.window.window_handle().0 as isize;
+        background(move || {
+            let outcome = crate::hello::verify(window, "Bare wants to show a saved password.");
+            Box::new(move |ui: &mut Ui| ui.on_verified(outcome, browser_id, &origin, &username))
+        });
+    }
+
+    fn on_verified(&mut self, outcome: crate::hello::Outcome, browser_id: i32, origin: &str, username: &str) {
+        use crate::hello::Outcome;
+        self.verifying = false;
+        match outcome {
+            Outcome::Verified => {
+                self.reveal_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                self.show_password(browser_id, origin, username);
+            }
+            // No Windows Hello on this PC: nothing to ask with.
+            Outcome::Unavailable => self.show_password(browser_id, origin, username),
+            Outcome::Refused => {}
+        }
+    }
+
+    /// Sends one password to the passwords page that asked for it (and only to that page).
+    fn show_password(&self, browser_id: i32, origin: &str, username: &str) {
+        let Some(password) = passwords::password(origin, username) else { return };
+        let tab = self.tabs.iter().find(|t| t.browser_id() == Some(browser_id) && t.page == Some(Page::Passwords));
+        if let Some(f) = tab.and_then(|t| t.browser.as_ref()).and_then(|b| b.main_frame()) {
+            let js = crate::block::js_string;
+            let script = format!("window.reveal&&reveal({},{},{})", js(origin), js(username), js(&password));
+            f.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
+        }
+    }
+
+    /// "Import passwords": a file picker for a CSV export from another browser.
+    fn choose_password_csv(&self, browser_id: i32) {
+        let tab = self.tabs.iter().find(|t| t.browser_id() == Some(browser_id));
+        let Some(host) = tab.and_then(|t| t.browser.as_ref()).and_then(|b| b.host()) else { return };
+        let mut filters = CefStringList::new();
+        filters.append(".csv");
+        host.run_file_dialog(
+            FileDialogMode::OPEN,
+            Some(&CefString::from("Import passwords (CSV)")),
+            None,
+            Some(&mut filters),
+            Some(&mut CsvChosen::new()),
+        );
+    }
+
+    pub fn import_password_csv(&mut self, file: std::path::PathBuf) {
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let text = match std::fs::metadata(&file) {
+            Ok(m) if m.len() > 50 * 1024 * 1024 => Err("the file is too large".to_string()),
+            _ => std::fs::read(&file).map(|b| String::from_utf8_lossy(&b).into_owned()).map_err(|e| e.to_string()),
+        };
+        match text.and_then(|t| passwords::import_csv(&t)) {
+            Ok(r) => {
+                let skipped = if r.skipped > 0 { format!(" ({} skipped: already saved, or not websites)", r.skipped) } else { String::new() };
+                let s = if r.added == 1 { "" } else { "s" };
+                pages::set_password_notice(
+                    &format!("Imported {} password{s}{skipped}. {name} holds your passwords unencrypted: delete it now.", r.added),
+                    Some(&name),
+                );
+                self.imported_csv = Some(file);
+            }
+            Err(e) => pages::set_password_notice(&format!("Couldn\u{2019}t import {name}: {e}."), None),
+        }
+        self.refresh_pages(Page::Passwords);
+        self.refresh();
+    }
+
     /// Fills the login picked from the 🔑 menu into the active page.
     pub fn fill_login(&mut self, index: usize) {
         let (Some(origin), Some(username)) = (self.active_origin(), self.menu_logins.get(index).cloned()) else { return };
@@ -1033,6 +1198,7 @@ impl Ui {
         self.focus_page();
     }
 
+    /// Turns the blocker off (or back on) for the current site, then reloads it. Remembered.
     fn toggle_shield(&mut self) {
         let Some(tab) = self.tabs.get(self.active) else { return };
         let Some(id) = tab.browser_id() else { return };
@@ -1108,7 +1274,7 @@ impl Ui {
                 rows.push((e.url.clone(), format!("{title}  —  {}", history::display_url(&e.url))));
             }
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         rows.retain(|(u, _)| seen.insert(u.trim_end_matches('/').to_string()));
         rows.truncate(MAX_SUGGESTIONS);
         self.suggestions = rows.iter().map(|(u, _)| u.clone()).collect();
@@ -1453,18 +1619,24 @@ impl Ui {
             (Some(Page::Settings), "make-default") => crate::system::open_default_apps_settings(),
             (Some(Page::Settings), "update-restart") => self.act(Action::UpdateRestart),
             (Some(Page::Settings), "open-passwords") => return self.open_page(Page::Passwords),
+            (Some(Page::Settings), "whats-new") => {
+                let notes = format!("{}/releases/tag/v{}", env!("CARGO_PKG_REPOSITORY"), update::VERSION);
+                return self.open(&notes);
+            }
             (Some(Page::Settings), "engine-check") => crate::engine::check(),
             (Some(Page::Settings), "engine-update") => crate::engine::download(),
             (Some(Page::Passwords), "pw-reveal") => {
-                // Only to the passwords page that asked, and only the one password.
-                let (origin, username) = (param("origin"), param("username"));
-                let Some(password) = passwords::password(origin, username) else { return };
-                let frame = self.tabs.iter().find(|t| t.browser_id() == Some(browser_id)).and_then(|t| t.browser.as_ref()).and_then(|b| b.main_frame());
-                if let Some(f) = frame {
-                    let script = format!("window.reveal&&reveal({},{},{})", crate::block::js_string(origin), crate::block::js_string(username), crate::block::js_string(&password));
-                    f.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
+                return self.reveal_password(browser_id, param("origin").into(), param("username").into());
+            }
+            (Some(Page::Passwords), "pw-import") => return self.choose_password_csv(browser_id),
+            (Some(Page::Passwords), "pw-delete-csv") => {
+                if let Some(file) = self.imported_csv.take() {
+                    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    match std::fs::remove_file(&file) {
+                        Ok(()) => pages::set_password_notice(&format!("Deleted {name}."), None),
+                        Err(e) => pages::set_password_notice(&format!("Couldn\u{2019}t delete {name}: {e}"), None),
+                    }
                 }
-                return;
             }
             (Some(Page::Passwords), "pw-delete") => passwords::remove(param("origin"), param("username")),
             (Some(Page::Passwords), "pw-never-remove") => passwords::set_never(param("origin"), false),
@@ -1540,7 +1712,9 @@ impl Ui {
             let visible = i >= first && i < first + fit;
             let active = i == self.active;
             let show_close = visible && (active || width >= TAB_CLOSE_MIN_WIDTH);
-            let label_width = width - if show_close { TAB_CLOSE_WIDTH } else { 0 };
+            // 🔊 / 🔇 while the tab plays sound or is muted (on visible tabs wide enough for it).
+            let show_sound = visible && (t.muted || !t.audible.is_empty()) && (active || width >= TAB_CLOSE_MIN_WIDTH);
+            let label_width = width - if show_close { TAB_CLOSE_WIDTH } else { 0 } - if show_sound { TAB_CLOSE_WIDTH } else { 0 };
             let chars = ((label_width - 20) / TAB_CHAR_WIDTH).max(2) as usize;
             t.button.set_text(Some(&CefString::from(t.label(chars).as_str())));
             t.button.set_minimum_size(Some(&Size { width: label_width, height: 0 }));
@@ -1549,6 +1723,9 @@ impl Ui {
             View::from(&t.button).set_background_color(if active { ACTIVE_TAB } else { 0 });
             View::from(&t.button).set_visible(visible as _);
             View::from(&t.close).set_visible(show_close as _);
+            View::from(&t.sound).set_visible(show_sound as _);
+            t.sound.set_text(Some(&CefString::from(if t.muted { "🔇" } else { "🔊" })));
+            Button::from(&t.sound).set_tooltip_text(Some(&CefString::from(if t.muted { "Unmute tab" } else { "Mute tab" })));
         }
         let hidden = self.tabs.len() - fit;
         View::from(&self.overflow).set_visible((hidden > 0) as _);
@@ -1591,7 +1768,8 @@ Memory usage: {}", memory::format_bytes(bytes)));
         let Some(menu) = menu_model_create(Some(&mut TabMenu::new())) else { return };
         for (i, t) in self.tabs.iter().enumerate() {
             let id = TAB_MENU_BASE + i as c_int;
-            menu.add_check_item(id, Some(&CefString::from(t.label(60).as_str())));
+            let sound = if t.muted { "🔇 " } else if t.audible.is_empty() { "" } else { "🔊 " };
+            menu.add_check_item(id, Some(&CefString::from(format!("{sound}{}", t.label(60)).as_str())));
             menu.set_checked(id, (i == self.active) as _);
         }
         let b = View::from(&self.overflow).bounds_in_screen();
@@ -1610,8 +1788,9 @@ Memory usage: {}", memory::format_bytes(bytes)));
         self.active = j;
         // Tab k's label and ✕ sit at strip positions 2k and 2k+1.
         for (k, t) in self.tabs.iter().enumerate() {
-            self.strip.reorder_child_view(Some(&mut View::from(&t.button)), 2 * k as c_int);
-            self.strip.reorder_child_view(Some(&mut View::from(&t.close)), 2 * k as c_int + 1);
+            self.strip.reorder_child_view(Some(&mut View::from(&t.button)), 3 * k as c_int);
+            self.strip.reorder_child_view(Some(&mut View::from(&t.sound)), 3 * k as c_int + 1);
+            self.strip.reorder_child_view(Some(&mut View::from(&t.close)), 3 * k as c_int + 2);
         }
         self.refresh();
     }
@@ -1989,6 +2168,18 @@ wrap_menu_model_delegate! {
 
 /// Menu command ids for the "▾ N" tab list are TAB_MENU_BASE + tab index.
 const TAB_MENU_BASE: c_int = 3000;
+
+wrap_run_file_dialog_callback! {
+    struct CsvChosen;
+
+    impl RunFileDialogCallback {
+        fn on_file_dialog_dismissed(&self, file_paths: Option<&mut CefStringList>) {
+            // Take the list itself: cloning a list CEF lent us yields an empty one.
+            let Some(path) = file_paths.and_then(|list| std::mem::take(list).into_iter().next()) else { return };
+            defer(move |ui| ui.import_password_csv(path.into()));
+        }
+    }
+}
 
 wrap_menu_model_delegate! {
     struct LoginMenu {}

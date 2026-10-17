@@ -31,13 +31,13 @@ Prefer no installer? Download `Bare-<version>-windows-x86_64.zip` instead, unzip
 
 | | |
 |---|---|
-| Tabs | `Ctrl+T` new, `Ctrl+W` / `Ctrl+F4` close, `Ctrl+Tab` / `Ctrl+Shift+Tab` switch, `Ctrl+1`…`Ctrl+8` go to a tab, `Ctrl+9` last tab, `Ctrl+Shift+PageUp` / `PageDown` move a tab. Tabs shrink as you open more; the rest are listed under **▾ N**. Hover a tab to see its **memory usage** |
+| Tabs | `Ctrl+T` new, `Ctrl+W` / `Ctrl+F4` close, `Ctrl+Tab` / `Ctrl+Shift+Tab` switch, `Ctrl+1`…`Ctrl+8` go to a tab, `Ctrl+9` last tab, `Ctrl+Shift+PageUp` / `PageDown` move a tab. Tabs shrink as you open more; the rest are listed under **▾ N**. Hover a tab to see its **memory usage**. A tab playing sound shows **🔊**: click it to mute the tab (**🔇**) |
 | New tab | `Ctrl+T` opens your search engine's home page (Google, DuckDuckGo, …) with the cursor in the address bar. Settings → Search can make new tabs blank instead |
 | Address bar | `Ctrl+L`, `Alt+D` or `F6`. Type a URL or search terms. **Suggestions** from your history and bookmarks appear as you type: `↑` / `↓` to pick, `Enter` to go, `Esc` to close |
 | History | `Ctrl+H` opens `bare://history`: search, remove entries, clear all. Nothing is recorded in private windows |
 | Bookmarks | `Ctrl+D` or **☆** bookmarks the page. The **bookmarks bar** (`Ctrl+Shift+B` to show/hide) shows them, with folders as menus and **»** for what doesn't fit. `Ctrl+Shift+O` opens `bare://bookmarks`: rename, delete, and **import from Chrome, Edge or Brave** |
 | Reader view | On articles, a **📖** button appears in the address bar (or press `F9`): the article is shown as clean, readable text, without ads, menus or pop-ups, in light or dark to match Windows. `F9` or **📖 Leave reader** goes back. Uses Mozilla's [Readability](https://github.com/mozilla/readability), the same as Firefox |
-| Passwords | After you sign in, a bar offers to **Save** the password (or **Never for this site**). On that site later, press **🔑** in the address bar to fill it in (a menu if you have several accounts). `bare://passwords` (Settings → Privacy → Manage passwords) lists them: search, show, delete. Nothing is saved in private windows |
+| Passwords | After you sign in, a bar offers to **Save** the password (or **Never for this site**). On that site later, press **🔑** in the address bar to fill it in (a menu if you have several accounts). `bare://passwords` (Settings → Privacy → Manage passwords) lists them: search, show (after Windows Hello confirms it's you), delete, and **import** a CSV export from Chrome, Edge, Brave, Firefox or Bitwarden. Nothing is saved in private windows |
 | Zoom | `Ctrl` `+` / `-` / `0`. A **125%** indicator appears when a page isn't at 100%; click it to reset. Remembered per site |
 | Picture-in-picture | Right-click a video → **Picture in picture**, or `Alt+P` for the video on the page |
 | Navigation | `Alt+Left` / `Alt+Right`, `F5` or `Ctrl+R` to reload |
@@ -69,14 +69,14 @@ Lists, in `data/`, are loaded at startup and compiled once into a cache in the p
 | [EasyPrivacy](https://easylist.to) | Trackers | GPLv3 / CC BY-SA 3.0 |
 | [HaGeZi Multi PRO](https://github.com/hagezi/dns-blocklists) | Ads, trackers, device and app telemetry (TikTok, Yandex, Xiaomi, Huawei, …) | GPLv3 |
 | [StevenBlack hosts](https://github.com/StevenBlack/hosts) | Ad, tracking and malware domains | MIT |
-| Bare extra (`data/bare-extra.txt`) | Analytics and device telemetry the big lists miss (PostHog, LG/Roku TV, Windows settings telemetry, …) | MIT |
+| Bare extra (`data/bare-extra.txt`) | Analytics and device telemetry the big lists miss (PostHog, LG/Roku TV, Windows settings telemetry, …), YouTube ad tracking (`s.youtube.com`, which also stops YouTube recording watch history), Instagram's API on other sites, Branch link tracking | MIT |
 
 Optional, off by default (Settings → Ad and tracker blocking):
 
 | Switch | Lists | Trade-off |
 |---|---|---|
 | **Block social media widgets** | [Fanboy's Social](https://easylist.to) (hides share buttons) + `data/bare-social.txt` (blocks Facebook, X, Pinterest, LinkedIn scripts and embeds on *other* sites) | "Log in with Facebook" and embedded posts on other sites stop working. The networks' own sites are unaffected |
-| **Hide cookie banners** | [EasyList Cookie](https://easylist.to) | You don't see consent choices; sites usually fall back to necessary cookies only |
+| **Hide cookie banners** | [EasyList Cookie](https://easylist.to) (hides the banners) + `data/bare-cookies.txt` (blocks Cookiebot, TrustArc, Didomi, Sourcepoint and Usercentrics) | You don't see consent choices; sites usually fall back to necessary cookies only |
 
 Switching these takes effect within a few seconds, without restarting.
 
@@ -104,9 +104,9 @@ The signing key was created once with `cargo xtask keygen`: the private half is 
 
 For each release:
 
-1. Bump `version` in `Cargo.toml` (e.g. `0.3.1`) and commit.
-2. Run `cargo xtask release`. It builds, packages and signs `dist/Bare-<version>-windows-x86_64.zip` and `dist/latest.txt`, and builds the installer `dist/BareSetup-<version>.exe`.
-3. On GitHub: **Releases → Draft a new release**, tag `v<version>` (e.g. `v0.3.1`), and drop **all three** files into the "Attach binaries" box at the bottom (not into the description). Publish it (not as a pre-release, so it counts as "latest").
+1. Bump `version` in `Cargo.toml` (e.g. `0.3.1`), add a `## 0.3.1` section to `CHANGELOG.md` saying what's new (for people using Bare), and commit.
+2. Run `cargo xtask release`. It builds, packages and signs `dist/Bare-<version>-windows-x86_64.zip` and `dist/latest.txt`, and builds the installer `dist/BareSetup-<version>.exe`. It also writes `dist/release-notes.md` from the changelog, and refuses to run if the changelog has no section for this version.
+3. On GitHub: **Releases → Draft a new release**, tag `v<version>` (e.g. `v0.3.1`), paste `dist/release-notes.md` into the description, and drop **all three** files into the "Attach binaries" box at the bottom (not into the description). Publish it (not as a pre-release, so it counts as "latest").
 
 Every installed copy of Bare then finds it within a day (or right away with Settings → Check now), verifies the signature and offers **Restart to update**. A new release must have a higher version than the installed one.
 
@@ -203,7 +203,8 @@ scripts/          refresh filter lists, regenerate icon
 - **Secure DNS with a fixed provider** stops all browsing if your network blocks that provider (as Chrome does). Some networks block Cloudflare's and Quad9's; switch to another provider or Automatic.
 - **Screen sharing** isn't supported yet (it needs a screen/window picker). Camera and microphone work.
 - **Videos in H.264 (`.mp4`) don't play.** Chromium builds for embedding leave out patented codecs; sites using WebM, VP9 or AV1 (YouTube included) work. Streaming services that need DRM (Netflix and similar) don't work either.
-- **Passwords:** Bare doesn't ask for your Windows password before showing saved passwords (Chrome does). It can't yet import passwords from other browsers, and sign-in forms inside embedded frames aren't captured.
+- **Passwords:** sign-in forms inside embedded frames aren't captured. If Windows Hello isn't set up on the PC, saved passwords are shown without asking.
+- **🔊 on tabs** notices `<audio>` and `<video>`, not sound made only with the Web Audio API (some games).
 - Tabs can't be dragged to reorder yet; use `Ctrl+Shift+PageUp` / `PageDown`.
 - **Location** uses Windows' location service, so it only works if location is turned on in Windows Settings → Privacy & security → Location.
 - Popups open without `window.opener`, so some "sign in with…" popup flows may not complete.

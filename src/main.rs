@@ -4,12 +4,14 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod audio;
 mod block;
 mod bookmarks;
 mod downloads;
 mod engine;
 mod engine_files;
 mod handlers;
+mod hello;
 mod history;
 mod memory;
 mod network;

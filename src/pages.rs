@@ -156,7 +156,23 @@ fn passwords_json() -> String {
         .map(|l| format!("{{\"origin\":{},\"site\":{},\"username\":{}}}", js_string(&l.origin), js_string(passwords::site(&l.origin)), js_string(&l.username)))
         .collect();
     let never: Vec<String> = passwords::never_list().iter().map(|o| js_string(o)).collect();
-    format!("{{\"items\":[{}],\"never\":[{}],\"offer\":{}}}", items.join(","), never.join(","), settings::get().save_passwords)
+    let (notice, csv) = PASSWORD_NOTICE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    format!(
+        "{{\"items\":[{}],\"never\":[{}],\"offer\":{},\"notice\":{},\"csv\":{}}}",
+        items.join(","),
+        never.join(","),
+        settings::get().save_passwords,
+        js_string(&notice),
+        csv.as_deref().map_or("null".into(), js_string),
+    )
+}
+
+/// The result of the last password import on bare://passwords, and the imported file's name
+/// while it can still be deleted from there.
+static PASSWORD_NOTICE: std::sync::Mutex<(String, Option<String>)> = std::sync::Mutex::new((String::new(), None));
+
+pub fn set_password_notice(text: &str, csv: Option<&str>) {
+    *PASSWORD_NOTICE.lock().unwrap_or_else(|e| e.into_inner()) = (text.to_string(), csv.map(String::from));
 }
 
 fn downloads_json() -> String {
@@ -323,7 +339,11 @@ function render(s){
   last=s;
   const c=el('input',{type:'checkbox',checked:s.offer,onchange:()=>A('pw-offer',{value:c.checked})});
   document.getElementById('offer').replaceChildren(el('label',{className:'row'},el('div',{className:'grow'},el('div',{textContent:'Offer to save passwords'}),
-    el('div',{className:'sub',textContent:'Saved passwords are encrypted for your Windows account and only filled in when you press 🔑 in the address bar.'})),c));
+    el('div',{className:'sub',textContent:'Saved passwords are encrypted for your Windows account, only filled in when you press 🔑 in the address bar, and only shown here after Windows Hello confirms it’s you.'})),c));
+  const tools=document.getElementById('tools');
+  tools.replaceChildren(el('button',{textContent:'Import passwords (CSV)…',title:'A password export from Chrome, Edge, Brave, Firefox, Bitwarden, …',onclick:()=>A('pw-import')}));
+  const n=document.getElementById('notice');n.textContent=s.notice;n.style.display=s.notice?'block':'none';
+  if(s.csv)tools.append(el('button',{className:'danger',textContent:'Delete '+s.csv,onclick:()=>A('pw-delete-csv')}));
   const q=document.getElementById('q').value.trim().toLowerCase();
   const items=s.items.filter(i=>!q||i.site.includes(q)||i.username.toLowerCase().includes(q));
   const list=document.getElementById('list');list.replaceChildren();
@@ -413,7 +433,7 @@ function render(s){
     toggle('blocking',s.blocking,'Block ads, trackers and malware','EasyList, EasyPrivacy, HaGeZi Pro and a malware/tracking domain list.'),
     toggle('cosmetic',s.cosmetic,'Hide leftover ad boxes','Removes empty spaces where blocked ads would have been.'),
     toggle('social',s.social,'Block social media widgets','Facebook, X, Pinterest and similar buttons, embeds and trackers on other sites. "Log in with Facebook" may stop working.'),
-    toggle('cookies',s.cookies,'Hide cookie banners','Hides cookie-consent pop-ups. Sites then usually fall back to necessary cookies only.'));
+    toggle('cookies',s.cookies,'Hide cookie banners','Hides cookie-consent pop-ups and blocks the consent services behind them (Cookiebot, TrustArc, Didomi, Usercentrics, …). Sites then usually fall back to necessary cookies only.'));
   document.getElementById('allowed').replaceChildren(...sites);
   document.getElementById('downloads').replaceChildren(toggle('ask',s.ask,'Ask where to save each file','Otherwise files go to your Downloads folder.'));
   renderNetwork(s);
@@ -422,6 +442,7 @@ function render(s){
     toggle('wipe',s.wipe,'Erase all browsing data on next start','Cookies, cache and all site storage. Turns itself off after running.'),
     row('Passwords','Saved sign-ins, encrypted for your Windows account.',el('button',{textContent:'Manage passwords',onclick:()=>A('open-passwords')})));
   const upd=el('div',{className:'row'},el('div',{className:'grow'},el('div',{textContent:'Bare '+s.version}),el('div',{className:'sub',textContent:s.update})));
+  upd.append(el('button',{textContent:'What’s new',onclick:()=>A('whats-new')}));
   if(s.updateReady)upd.append(el('button',{className:'primary',textContent:'Restart to update',onclick:()=>A('update-restart')}));
   else if(s.updateEnabled)upd.append(el('button',{textContent:'Check now',onclick:()=>A('update-check')}));
   const eng=row('Chromium engine '+s.engine,s.engineStatus);
@@ -455,7 +476,7 @@ fn html(page: Page) -> String {
         ),
         Page::Passwords => (
             r#"<main><h1>Passwords</h1><div class="card" id="offer"></div>
-<h2>Saved passwords</h2><input type="text" id="q" placeholder="Search passwords" spellcheck="false" style="width:100%;max-width:none;margin-bottom:8px"><div class="card" id="list"></div>
+<h2>Saved passwords</h2><div class="tools" id="tools"></div><div class="sub notice-ok" id="notice"></div><input type="text" id="q" placeholder="Search passwords" spellcheck="false" style="width:100%;max-width:none;margin-bottom:8px"><div class="card" id="list"></div>
 <h2>Never saved for</h2><div class="card" id="never"></div></main>"#,
             PASSWORDS_SCRIPT,
         ),

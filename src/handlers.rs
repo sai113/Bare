@@ -14,7 +14,7 @@ use std::{
 
 use cef::*;
 
-use crate::{block, downloads, pages, passwords, permissions, reader, settings, ui, url};
+use crate::{audio, block, downloads, pages, passwords, permissions, reader, settings, ui, url};
 
 #[derive(Default)]
 pub struct Shared {
@@ -133,6 +133,13 @@ wrap_display_handler! {
         /// message; reply with the generic hide rules that match them.
         fn on_console_message(&self, browser: Option<&mut Browser>, _level: LogSeverity, message: Option<&CefString>, _source: Option<&CefString>, _line: ::std::os::raw::c_int) -> ::std::os::raw::c_int {
             let msg = text(message);
+            if let Some((frame, playing)) = audio::parse_report(&msg) {
+                if let Some(b) = browser {
+                    let (id, frame) = (b.identifier(), frame.to_string());
+                    ui::with_ui(move |ui| ui.on_audio(id, frame, playing));
+                }
+                return 1;
+            }
             if let Some((token, login)) = passwords::parse_report(&msg) {
                 if let (Some(b), Some(login)) = (browser, login) {
                     let id = b.identifier();
@@ -188,12 +195,17 @@ wrap_load_handler! {
         }
 
         /// Cosmetic filtering (hide site-specific ad elements, and start reporting class
-        /// names/ids for generic rules) and watching for logins to offer to save.
+        /// names/ids for generic rules), watching for logins to offer to save, and for sound.
         fn on_load_start(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition_type: TransitionType) {
             let (Some(b), Some(f)) = (browser, frame) else { return };
+            // Every frame (embedded players too): report when it plays sound, for the tab's 🔊.
+            f.execute_java_script(Some(&CefString::from(audio::watcher_script().as_str())), None, 0);
             if f.is_main() != 1 {
                 return;
             }
+            // A new page: whatever the old one was playing has stopped.
+            let id = b.identifier();
+            ui::with_ui(move |ui| ui.on_audio_reset(id));
             let page = userfree(&f.url());
             let host = url::host(&page.to_ascii_lowercase()).unwrap_or("").to_string();
             let s = settings::get();
