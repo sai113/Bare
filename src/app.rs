@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use cef::*;
 
-use crate::{block, handlers, network, permissions, settings, ui, update, url};
+use crate::{block, handlers, network, permissions, settings, system, ui, update, url};
 
 /// Runs one CEF process. The browser process returns when the last window closes; renderer,
 /// GPU and utility processes return from `execute_process` immediately.
@@ -32,23 +32,44 @@ pub fn run(args: &args::Args, sandbox_info: *mut u8) -> i32 {
     permissions::init(&root);
     update::init(&root);
 
+    // A private window runs as its own Bare process with a throwaway Chromium folder, so it
+    // never hands off to (or shares anything with) an already open normal window.
+    let private = cmd_line.has_switch(Some(&CefString::from("private"))) == 1;
+    let (cef_root, cache) = if private {
+        let tmp = std::env::temp_dir().join(format!("bare-private-{}", std::process::id()));
+        (tmp, String::new())
+    } else {
+        (root.clone(), root.join("Default").to_string_lossy().into_owned())
+    };
     let settings = Settings {
         no_sandbox: cfg!(all(windows, not(feature = "sandbox"))) as _,
-        root_cache_path: CefString::from(root.to_string_lossy().as_ref()),
-        cache_path: CefString::from(root.join("Default").to_string_lossy().as_ref()),
+        root_cache_path: CefString::from(cef_root.to_string_lossy().as_ref()),
+        cache_path: CefString::from(cache.as_str()),
         // No debug.log next to the executable.
         log_severity: LogSeverity::DISABLE,
         // Dev tools and other CEF-owned popups get a default window.
         use_views_default_popup: 1,
         ..Default::default()
     };
+    // Fails (returns 0) when another Bare is already running: CEF has then passed our command
+    // line to it (see `on_already_running_app_relaunch`), which opens it in its window.
     if initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), sandbox_info) != 1 {
-        return 1;
+        return 0;
     }
     run_message_loop();
     shutdown();
+    if private {
+        let _ = std::fs::remove_dir_all(&cef_root);
+    }
     update::apply_if_staged();
     0
+}
+
+/// URLs, files or searches given on a command line (everything that isn't a --switch).
+fn launch_targets(cl: &CommandLine) -> Vec<String> {
+    let mut list = CefStringList::new();
+    cl.arguments(Some(&mut list));
+    list.into_iter().filter(|a| !a.trim().is_empty()).map(|a| system::launch_target(&a)).collect()
 }
 
 /// Per-user profile folder.
@@ -108,16 +129,11 @@ wrap_browser_process_handler! {
             let has = |s: &str| cl.as_ref().is_some_and(|c| c.has_switch(Some(&CefString::from(s))) == 1);
             let private = has("private");
 
-            // First non-switch argument is a URL or search to open.
-            let mut start = url::BLANK.to_string();
-            if let Some(cl) = cl.as_ref() {
-                let mut list = CefStringList::new();
-                cl.arguments(Some(&mut list));
-                if let Some(first) = list.into_iter().next() {
-                    // bare://settings etc. are opened as built-in pages by the window.
-                    let page = first.to_ascii_lowercase().starts_with("bare://");
-                    start = if page { first } else { url::resolve(&first, settings::get().search.prefix()) };
-                }
+            // The first link/file/search given on the command line; others open as more tabs.
+            let mut targets = cl.as_ref().map(launch_targets).unwrap_or_default();
+            let start = if targets.is_empty() { url::BLANK.to_string() } else { targets.remove(0) };
+            for extra in targets {
+                ui::defer(move |ui| ui.open_target(&extra));
             }
 
             // Private mode: an in-memory profile (empty cache path), discarded on exit.
@@ -128,8 +144,10 @@ wrap_browser_process_handler! {
             };
             if let Some(ctx) = context.as_mut() {
                 apply_privacy_defaults(ctx);
-                // Undo "Allow until Bare closes" grants left over from a crash.
-                ui::reset_session_grants(ctx);
+                if !private {
+                    // Undo "Allow until Bare closes" grants left over from a crash.
+                    ui::reset_session_grants(ctx);
+                }
             }
             {
                 let s = settings::get();
@@ -141,6 +159,22 @@ wrap_browser_process_handler! {
 
             let mut delegate = ui::MainWindow::new(handlers::client(), context, start, private);
             window_create_top_level(Some(&mut delegate));
+        }
+
+        /// Bare was started again while running (e.g. a link clicked in another app, now that
+        /// Bare can be the default browser): open what it was given here, in new tabs.
+        fn on_already_running_app_relaunch(&self, command_line: Option<&mut CommandLine>, _current_directory: Option<&CefString>) -> ::std::os::raw::c_int {
+            let targets = command_line.as_ref().map(|cl| launch_targets(cl)).unwrap_or_default();
+            ui::defer(move |ui| {
+                if targets.is_empty() {
+                    ui.open_target(url::BLANK);
+                }
+                for t in &targets {
+                    ui.open_target(t);
+                }
+                ui.bring_to_front();
+            });
+            1
         }
     }
 }

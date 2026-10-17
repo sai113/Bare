@@ -18,6 +18,8 @@ mod permissions;
 #[cfg(all(windows, feature = "sandbox"))]
 mod settings;
 #[cfg(all(windows, feature = "sandbox"))]
+mod system;
+#[cfg(all(windows, feature = "sandbox"))]
 mod ui;
 #[cfg(all(windows, feature = "sandbox"))]
 mod update;

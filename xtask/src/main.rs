@@ -233,7 +233,12 @@ fn release() -> Result<()> {
     } else {
         tar.args(["-c", "-z", "-f"]);
     }
-    if !tar.arg(&archive).arg("-C").arg(dist.join("Bare")).arg(".").status()?.success() {
+    // Name the top-level files and folders rather than ".": entries like "./Bare.exe" make
+    // Windows Explorer reject the zip as invalid.
+    let app = dist.join("Bare");
+    let mut entries: Vec<_> = fs::read_dir(&app)?.filter_map(|e| e.ok().map(|e| e.file_name())).collect();
+    entries.sort();
+    if !tar.arg(&archive).arg("-C").arg(&app).args(&entries).status()?.success() {
         return Err("creating the archive failed".into());
     }
 
@@ -259,7 +264,41 @@ fn release() -> Result<()> {
     println!("Release {version} for {platform}:");
     println!("  upload {} to {url}", archive.display());
     println!("  publish {} at $BARE_UPDATE_URL", manifest_path.display());
+
+    if cfg!(windows) {
+        match build_installer(&root, &version)? {
+            Some(setup) => println!("  attach {} for people installing Bare", setup.display()),
+            None => println!("  (Inno Setup not found: skipped BareSetup.exe. Install it with `winget install JRSoftware.InnoSetup`.)"),
+        }
+    }
     Ok(())
+}
+
+/// Builds dist/BareSetup-<version>.exe from installer/bare.iss with Inno Setup's compiler.
+fn build_installer(root: &Path, version: &str) -> Result<Option<PathBuf>> {
+    let local = env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default();
+    let candidates = [
+        env::var_os("ISCC").map(PathBuf::from),
+        Some(local.join(r"Programs\Inno Setup 6\ISCC.exe")),
+        env::var_os("ProgramFiles(x86)").map(|p| PathBuf::from(p).join(r"Inno Setup 6\ISCC.exe")),
+        env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join(r"Inno Setup 6\ISCC.exe")),
+    ];
+    let Some(iscc) = candidates.into_iter().flatten().find(|p| p.exists()) else { return Ok(None) };
+    let dist = root.join("dist");
+    let setup = dist.join(format!("BareSetup-{version}.exe"));
+    let _ = fs::remove_file(&setup);
+    let status = Command::new(iscc)
+        .arg("/Q")
+        .arg(format!("/DAppVersion={version}"))
+        .arg(format!("/DSourceDir={}", dist.join("Bare").display()))
+        .arg(format!("/DRepoDir={}", root.display()))
+        .arg(format!("/O{}", dist.display()))
+        .arg(root.join("installer").join("bare.iss"))
+        .status()?;
+    if !status.success() || !setup.exists() {
+        return Err("building the installer failed".into());
+    }
+    Ok(Some(setup))
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<()> {

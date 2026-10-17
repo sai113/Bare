@@ -11,6 +11,7 @@ mod network;
 mod pages;
 mod permissions;
 mod settings;
+mod system;
 mod ui;
 mod update;
 mod url;

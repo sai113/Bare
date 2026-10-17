@@ -13,7 +13,17 @@ A minimal, private web browser built on Chromium. Tabs, an address bar, and noth
 
 ## Download
 
-Get the latest Windows build from [Releases](https://github.com/sai113/Bare/releases/latest): download `Bare-<version>-windows-x86_64.zip`, unzip it anywhere you can write to (e.g. your user folder, not Program Files, so it can update itself), and run `Bare.exe`. Windows SmartScreen may warn the first time because the app isn't code-signed: choose **More info → Run anyway**.
+1. Download **`BareSetup-<version>.exe`** from [the latest release](https://github.com/sai113/Bare/releases/latest).
+2. Run it. Windows SmartScreen may warn the first time because the app isn't code-signed: choose **More info → Run anyway**.
+3. Click **Install**. No administrator rights are needed.
+
+The installer:
+- installs Bare for your user only, in `%LOCALAPPDATA%\Programs\Bare`, where it keeps itself up to date
+- adds **Bare** and **Bare (private window)** to the Start menu, plus an optional desktop shortcut
+- registers Bare as a browser. To make it your default, go to Settings → About → **Make default** (or Windows Settings → Apps → Default apps → Bare)
+- can be removed from **Windows Settings → Apps**, like any app. It asks whether to also delete your browsing data
+
+Prefer no installer? Download `Bare-<version>-windows-x86_64.zip` instead, unzip it somewhere you can write to (not Program Files) and run `Bare.exe`. It works the same, except it can't become your default browser.
 
 ## Features
 
@@ -30,7 +40,7 @@ Get the latest Windows build from [Releases](https://github.com/sai113/Bare/rele
 | Find in page | `Ctrl+F`; `Enter` / `F3` next, `Shift+Enter` / `Shift+F3` previous, `Esc` to close |
 | Site permissions | When a site asks for your camera, microphone, location, clipboard, … a bar under the address bar shows "*site* wants to …" with **Allow** / **Block**. Answers last until Bare closes. Notification requests are always refused |
 | Page | `F12` dev tools; built-in PDF viewer |
-| Private mode | `Bare.exe --private` (in-memory profile, nothing written to disk) |
+| Private window | Start menu → **Bare (private window)**, or `Bare.exe --private`: a separate window with an in-memory profile, nothing written to disk |
 | Open on start | `Bare.exe example.com`, `Bare.exe bare://settings` |
 
 Search engines: DuckDuckGo (default), Brave Search, Startpage, Google, Bing.
@@ -86,8 +96,8 @@ The signing key was created once with `cargo xtask keygen`: the private half is 
 For each release:
 
 1. Bump `version` in `Cargo.toml` (e.g. `0.3.1`) and commit.
-2. Run `cargo xtask release`. It builds, packages and signs `dist/Bare-<version>-windows-x86_64.zip` and `dist/latest.txt`.
-3. On GitHub: **Releases → Draft a new release**, tag `v<version>` (e.g. `v0.3.1`), and attach **both** files. Publish it (not as a pre-release, so it counts as "latest").
+2. Run `cargo xtask release`. It builds, packages and signs `dist/Bare-<version>-windows-x86_64.zip` and `dist/latest.txt`, and builds the installer `dist/BareSetup-<version>.exe`.
+3. On GitHub: **Releases → Draft a new release**, tag `v<version>` (e.g. `v0.3.1`), and drop **all three** files into the "Attach binaries" box at the bottom (not into the description). Publish it (not as a pre-release, so it counts as "latest").
 
 Every installed copy of Bare then finds it within a day (or right away with Settings → Check now), verifies the signature and offers **Restart to update**. A new release must have a higher version than the installed one.
 
@@ -111,6 +121,7 @@ Update logs are written to `%LOCALAPPDATA%\Bare\update\update.log`.
 Requirements:
 - [Rust](https://rustup.rs) (stable)
 - CMake and Ninja (`winget install Kitware.CMake Ninja-build.Ninja` on Windows)
+- To build the installer: Inno Setup 6 (`winget install JRSoftware.InnoSetup`)
 - Windows: the Visual Studio C++ build tools
 
 ```sh
@@ -138,6 +149,8 @@ src/url.rs        address-bar parsing, HTTPS-only rules
 src/lib.rs        Windows sandbox entry point (RunWinMain)
 src/main.rs       executable entry point (Linux, macOS, Windows without sandbox)
 xtask/            cargo xtask package | keygen | release
+installer/bare.iss  Windows installer (Inno Setup)
+src/system.rs     default-browser status, opening links and files from other apps
 assets/           app icon
 data/             filter lists, update public key
 scripts/          refresh filter lists, regenerate icon

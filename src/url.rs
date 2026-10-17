@@ -87,6 +87,22 @@ pub fn encode(s: &str) -> String {
     out
 }
 
+/// A `file:///` URL for a local path (for files opened from Explorer, never the address bar).
+pub fn file_url(path: &std::path::Path) -> String {
+    let p = path.to_string_lossy().replace('\\', "/");
+    let mut out = String::from("file:///");
+    for c in p.trim_start_matches('/').chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            ' ' => out.push_str("%20"),
+            '#' => out.push_str("%23"),
+            '?' => out.push_str("%3F"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Decodes `%XX` escapes and `+` (as space).
 pub fn decode(s: &str) -> String {
     let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
@@ -155,6 +171,12 @@ mod tests {
         assert_eq!(query("https://x.test/p?a=1&b=hello+w%C3%B6rld&c#frag"), vec![("a".into(), "1".into()), ("b".into(), "hello wörld".into()), ("c".into(), "".into())]);
         assert!(query("https://x.test/").is_empty());
         assert_eq!(decode(&encode("a b/&=ü")), "a b/&=ü");
+    }
+
+    #[test]
+    fn file_urls() {
+        let p = std::path::Path::new(r"C:\Users\me\My Docs\a#1 100%.html");
+        assert_eq!(file_url(p), "file:///C:/Users/me/My%20Docs/a%231%20100%25.html");
     }
 
     #[test]

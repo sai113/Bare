@@ -609,6 +609,24 @@ impl Ui {
         self.refresh_pages(Page::Settings);
     }
 
+    /// Opens a launch target in a new tab: a web address, a file, or a bare:// page.
+    pub fn open_target(&mut self, target: &str) {
+        match Page::from_address(target) {
+            Some(page) => self.open_page(page),
+            None => self.open(target),
+        }
+    }
+
+    /// Shows the window in front of other apps (restoring it if minimised).
+    pub fn bring_to_front(&self) {
+        if self.window.is_minimized() == 1 {
+            self.window.restore();
+        }
+        self.window.show();
+        self.window.activate();
+        self.window.bring_to_top();
+    }
+
     /// Shows a built-in page, reusing its tab if one is already open.
     fn open_page(&mut self, page: Page) {
         if let Some(i) = self.tabs.iter().position(|t| t.page == Some(page)) {
@@ -726,6 +744,7 @@ impl Ui {
             }
             (Some(Page::Settings), "clear-data") => self.clear_cookies_and_cache(),
             (Some(Page::Settings), "update-check") => update::check(),
+            (Some(Page::Settings), "make-default") => crate::system::open_default_apps_settings(),
             (Some(Page::Settings), "update-restart") => self.act(Action::UpdateRestart),
             _ => return,
         }
@@ -1142,10 +1161,7 @@ wrap_window_delegate! {
             let ui = Ui::create(window, self.client.clone(), self.context.clone(), self.private);
             UI.with(|cell| *cell.borrow_mut() = Some(ui));
             let start = self.start.clone();
-            with_ui(move |ui| match Page::from_address(&start) {
-                Some(page) => ui.open_page(page),
-                None => ui.open(&start),
-            });
+            with_ui(move |ui| ui.open_target(&start));
             window.show();
             // Check for updates shortly after startup (at most once a day, if enabled).
             post_delayed_task(ThreadId::UI, Some(&mut UpdateTimer::new()), 15_000);

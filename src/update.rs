@@ -37,6 +37,8 @@ const PUBLIC_KEY_HEX: &str = include_str!("../data/update-key.pub");
 const MAX_MANIFEST: usize = 64 * 1024;
 const MAX_PACKAGE: i64 = 2 * 1024 * 1024 * 1024;
 const CHECK_EVERY_SECS: u64 = 24 * 60 * 60;
+/// The installer's AppId (installer/bare.iss); never changes.
+const INSTALLER_APP_ID: &str = "B6FF0361-A243-4B32-97EE-94D5CE3B8EF0";
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Status {
@@ -255,11 +257,18 @@ pub fn apply_if_staged() {
              powershell -NoProfile -NonInteractive -Command \"Wait-Process -Id {pid} -ErrorAction SilentlyContinue\"\r\n\
              robocopy \"{s}\" \"{a}\" /E /IS /IT /R:60 /W:1 /NP /NFL /NDL >> \"{l}\"\r\n\
              if %errorlevel% geq 8 (echo copy failed: %errorlevel% >> \"{l}\") else (rmdir /S /Q \"{s}\" & del \"{m}\" & echo done >> \"{l}\")\r\n\
+             reg query \"{k}\" >nul 2>&1 && reg add \"{k}\" /v DisplayVersion /d \"{v}\" /f >nul 2>&1\r\n\
              {relaunch}del \"%~f0\"\r\n",
             s = staging.display(),
             a = app.display(),
             l = log.display(),
             m = marker.display(),
+            // Installed with BareSetup.exe: keep "Settings -> Apps" showing the right version.
+            k = format!(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{{{INSTALLER_APP_ID}}}_is1"),
+            v = match status() {
+                Status::Ready { version } => version,
+                _ => String::new(),
+            },
             relaunch = if relaunch { format!("start \"\" \"{}\"\r\n", app.join("Bare.exe").display()) } else { String::new() },
         );
         if fs::write(&script, text).is_ok() {

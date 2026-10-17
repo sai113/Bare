@@ -13,7 +13,7 @@ use std::{
 
 use cef::*;
 
-use crate::{block::js_string, downloads, network, settings, update};
+use crate::{block::js_string, downloads, network, settings, system, update};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -168,7 +168,9 @@ fn settings_json() -> String {
         js_string(&notice()),
     );
     format!(
-        "{{{net}\"search\":\"{}\",\"engines\":[{}],\"blocking\":{},\"cosmetic\":{},\"social\":{},\"cookies\":{},\"allowed\":[{}],\"ask\":{},\"autoUpdate\":{},\"wipe\":{},\"version\":{},\"update\":{},\"updateReady\":{},\"updateEnabled\":{}}}",
+        "{{{net}\"registered\":{},\"isDefault\":{},\"search\":\"{}\",\"engines\":[{}],\"blocking\":{},\"cosmetic\":{},\"social\":{},\"cookies\":{},\"allowed\":[{}],\"ask\":{},\"autoUpdate\":{},\"wipe\":{},\"version\":{},\"update\":{},\"updateReady\":{},\"updateEnabled\":{}}}",
+        system::registered_as_browser(),
+        system::is_default_browser(),
         s.search.id(),
         engines.join(","),
         s.blocking,
@@ -289,7 +291,12 @@ function render(s){
   const upd=el('div',{className:'row'},el('div',{className:'grow'},el('div',{textContent:'Bare '+s.version}),el('div',{className:'sub',textContent:s.update})));
   if(s.updateReady)upd.append(el('button',{className:'primary',textContent:'Restart to update',onclick:()=>A('update-restart')}));
   else if(s.updateEnabled)upd.append(el('button',{textContent:'Check now',onclick:()=>A('update-check')}));
-  document.getElementById('about').replaceChildren(upd,toggle('autoUpdate',s.autoUpdate,'Update automatically','Checks once a day. Updates are verified with a signature before installing.'));
+  const def = s.isDefault
+    ? row('Default browser','Bare opens links from other apps.')
+    : s.registered
+      ? row('Default browser','Open links from email, chat and other apps in Bare.',el('button',{className:'primary',textContent:'Make default',onclick:()=>A('make-default')}))
+      : row('Default browser','Install Bare with BareSetup.exe to make it your default browser.');
+  document.getElementById('about').replaceChildren(def,upd,toggle('autoUpdate',s.autoUpdate,'Update automatically','Checks once a day. Updates are verified with a signature before installing.'));
 }
 "#;
 
