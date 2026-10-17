@@ -3,8 +3,47 @@
 # Bare
 
 [![CI](https://github.com/sai113/Bare/actions/workflows/ci.yml/badge.svg)](https://github.com/sai113/Bare/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/sai113/Bare)](https://github.com/sai113/Bare/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A minimal, private web browser built on Chromium. Tabs, an address bar, and nothing else.
+**A Chromium browser with ad blocking built in, and nothing else: no accounts, telemetry, AI or news feed. About 7,500 lines of Rust that you can read in an afternoon.**
+
+![Bare on The Verge, with 12 ads and trackers blocked](docs/screenshots/blocking.png)
+
+## Install
+
+```
+winget install sai113.Bare
+```
+
+*(The winget package is waiting for Microsoft's approval. Until `winget` finds it, use the download below.)*
+
+Or download **`BareSetup.exe`** from the [latest release](https://github.com/sai113/Bare/releases/latest) and run it. No administrator rights needed. Windows 10 and 11, 64-bit. ([More about installing](#download))
+
+| Reader view (📖 or F9) | Site menu (🔒): clear a site's cookies and data |
+|---|---|
+| ![Reader view showing a Wikipedia article as clean text](docs/screenshots/reader.png) | ![The site menu open on Wikipedia](docs/screenshots/site-menu.png) |
+
+## Bare, Chrome and Brave
+
+|  | Bare | Chrome | Brave |
+|---|---|---|---|
+| Engine | Chromium (bundled through CEF) | Chromium | Chromium |
+| Ad and tracker blocking | Built in (uBlock Origin-style lists) | Only through extensions, which Manifest V3 limits | Built in |
+| Ads inside YouTube videos | Not blocked (YouTube's tracking is) | Not blocked | Blocked |
+| Usage data sent to the maker | None (only the daily update check) | Yes | Anonymous usage stats, can be turned off |
+| Account and sync | No | Google account | Optional sync |
+| Extras | None | Google services, AI features | Rewards, crypto wallet, VPN, AI assistant, news |
+| Extensions | No | Yes | Yes |
+| Password manager | Built in, local, Windows Hello to view | Built in, syncs | Built in, syncs |
+| Chromium security updates | Signed engine updates, approved by one maintainer | Automatic, within days | Automatic, within days |
+| `.mp4` video, Netflix | No | Yes | Yes |
+| Platforms | Windows | All | All |
+| Browser code to read | About 7,500 lines (plus Chromium) | Very large, partly closed | Very large |
+
+**If you want a complete browser, use Brave or Firefox.** Bare is for people who want a minimal, private browser whose own code they can actually read.
+
+## What's in it
 
 - **Chromium engine, bundled.** Bare ships its own copy of Chromium through the [Chromium Embedded Framework](https://github.com/chromiumembedded/cef) (CEF), so it doesn't depend on any browser engine installed on the computer.
 - **Sandboxed.** Every web page runs in a locked-down Chromium sandbox process, the same model Chrome uses.
@@ -88,6 +127,15 @@ Refresh the downloaded lists with `pwsh scripts/update-blocklist.ps1`. They ship
 
 Not supported (yet): uBlock Origin's scriptlet injection, which some sites such as YouTube need for full ad blocking.
 
+## How updates are signed
+
+- Every Bare release, and every Chromium engine approved for Bare, comes with a small manifest **signed with the project's Ed25519 key**. The private key never leaves the maintainer's computer; the public key is built into Bare.
+- Bare installs something only if the signature checks out, the download's SHA-256 matches the signed one, and it's newer than what's installed. Someone who took over the download server still couldn't push anything to users.
+- Engine updates download straight from CEF's official build server, but install only if the file matches the hash the maintainer signed.
+- **Who patches Chromium?** A [GitHub Action](.github/workflows/cef-watch.yml) checks CEF's build server every day and opens an issue as soon as a newer stable Chromium is out, with the steps to approve it. Found a security problem? See [SECURITY.md](SECURITY.md).
+
+The details follow.
+
 ## Automatic updates
 
 Each release publishes an archive plus a small manifest, `latest.txt`, containing the version, download URL and SHA-256 hash, **signed with an Ed25519 key that only the publisher holds**. Bare checks once a day (or on demand in Settings) and only installs an update if:
@@ -113,6 +161,18 @@ For each release:
 Every installed copy of Bare then finds it within a day (or right away with Settings → Check now), verifies the signature and offers **Restart to update**. A new release must have a higher version than the installed one.
 
 Update logs are written to `%LOCALAPPDATA%\Bare\update\update.log`.
+
+### Publishing to winget
+
+Once a release is published on GitHub, add it to winget so people can `winget install sai113.Bare`:
+
+1. `cargo xtask winget` downloads the published `BareSetup-<version>.exe`, hashes it, and writes the three manifest files to `dist/winget/manifests/s/sai113/Bare/<version>/`. (`cargo xtask release` writes them too, from the local installer.)
+2. Check them: `winget validate --manifest dist\winget\manifests\s\sai113\Bare\<version>`.
+3. Submit them, either:
+   - with Microsoft's tool: `winget install wingetcreate`, then `wingetcreate submit --token <GitHub token> dist\winget\manifests\s\sai113\Bare\<version>` (it opens the pull request for you), or
+   - by hand: fork [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs), copy the folder to `manifests/s/sai113/Bare/<version>/`, and open a pull request.
+
+Microsoft's bots test the installer, and a person reviews the first submission, which can take a few days. Later versions usually go through automatically. Installed copies of Bare keep updating themselves either way.
 
 ### Chromium engine updates
 
@@ -186,6 +246,9 @@ src/engine.rs     Chromium engine updates, separate from Bare's own
 src/engine_files.rs  which files make up the engine (shared with xtask)
 src/winres.rs     gives CEF's launcher Bare's icon and version (shared with xtask)
 .github/workflows/ci.yml  tests and builds every pull request (GitHub Actions)
+.github/workflows/cef-watch.yml  daily check for a newer Chromium engine (opens an issue)
+docs/screenshots/  the screenshots in this README
+SECURITY.md       how to report a vulnerability
 assets/           app icon, Mozilla Readability (Apache-2.0)
 data/             filter lists, update public key
 scripts/          refresh filter lists, regenerate icon

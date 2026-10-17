@@ -2,6 +2,10 @@
 
 Each section becomes the notes of that version's GitHub release (`cargo xtask release` copies it into `dist/release-notes.md`). Write for people using Bare: what they'll notice, not how it was built.
 
+## 0.9.1
+
+- **Fixed:** allrecipes.com, people.com, investopedia.com and the same publisher's other sites showed only a "Please allow ads" page. They load normally again, with ads still blocked.
+
 ## 0.9.0
 
 - **Security fixes:**

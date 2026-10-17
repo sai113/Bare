@@ -7,6 +7,8 @@
 //! - `cargo xtask engine <CEF version>`: downloads that Chromium engine from CEF's build server
 //!   and builds `dist/engine-test` (this Bare on that engine) to try it out. With `--approve`, signs
 //!   `engines.txt` so installed copies of Bare offer it in Settings.
+//! - `cargo xtask winget [version]`: winget manifests for a published release (default: this
+//!   version), from the installer attached to it on GitHub.
 
 use std::{
     env, fs,
@@ -26,7 +28,7 @@ mod engine_files;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-const USAGE: &str = "usage: cargo xtask <package | keygen | release | engine <CEF version> [--approve] [--beta]>";
+const USAGE: &str = "usage: cargo xtask <package | keygen | release | engine <CEF version> [--approve] [--beta] | winget [version]>";
 
 fn main() -> ExitCode {
     let task = env::args().nth(1);
@@ -35,6 +37,7 @@ fn main() -> ExitCode {
         Some("keygen") => keygen(),
         Some("release") => release(),
         Some("engine") => engine(),
+        Some("winget") => winget(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::FAILURE;
@@ -294,11 +297,123 @@ fn release() -> Result<()> {
 
     if cfg!(windows) {
         match build_installer(&root, &version)? {
-            Some(setup) => println!("  attach {} for people installing Bare", setup.display()),
+            Some(setup) => {
+                println!("  attach {} for people installing Bare", setup.display());
+                let manifests = winget_manifests(&root, &version, &setup)?;
+                println!("  after publishing, submit {} to winget (see README)", manifests.display());
+            }
             None => println!("  (Inno Setup not found: skipped BareSetup.exe. Install it with `winget install JRSoftware.InnoSetup`.)"),
         }
     }
     Ok(())
+}
+
+/// The installer's AppId (installer/bare.iss): how Windows and winget recognise an installed Bare.
+const INSTALLER_PRODUCT_CODE: &str = "{B6FF0361-A243-4B32-97EE-94D5CE3B8EF0}_is1";
+const WINGET_SCHEMA: &str = "1.9.0";
+
+/// Writes the winget manifests for this release (dist/winget/manifests/…/<version>), ready to
+/// submit to microsoft/winget-pkgs once the release is published on GitHub.
+fn winget_manifests(root: &Path, version: &str, setup: &Path) -> Result<PathBuf> {
+    let setup_name = setup.file_name().and_then(|n| n.to_str()).ok_or("bad installer name")?;
+    winget_manifests_for(root, version, setup_name, &hex(&Sha256::digest(fs::read(setup)?)))
+}
+
+/// `cargo xtask winget [version]`: winget manifests for a release already on GitHub, from the
+/// installer as published there (downloaded and hashed).
+fn winget() -> Result<()> {
+    let root = root();
+    let version = match env::args().nth(2) {
+        Some(v) => v.trim_start_matches('v').to_string(),
+        None => version(&root)?,
+    };
+    let repo = repository(&root)?;
+    let name = format!("BareSetup-{version}.exe");
+    let url = format!("{repo}/releases/download/v{version}/{name}");
+    let cache = root.join("dist").join("winget-download");
+    fs::create_dir_all(&cache)?;
+    let file = cache.join(&name);
+    println!("Downloading {url}");
+    if !Command::new("curl").args(["-fsSL", "-o"]).arg(&file).arg(&url).status()?.success() {
+        return Err(format!("couldn't download {url}: is v{version} published with {name} attached?").into());
+    }
+    let dir = winget_manifests_for(&root, &version, &name, &hex(&Sha256::digest(fs::read(&file)?)))?;
+    fs::remove_dir_all(&cache)?;
+    println!("winget manifests for {version}: {}", dir.display());
+    println!("  check them: winget validate --manifest \"{}\"", dir.display());
+    println!("  submit them: wingetcreate submit \"{}\" (see README)", dir.display());
+    Ok(())
+}
+
+fn repository(root: &Path) -> Result<String> {
+    let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+    manifest
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("repository = \"")?.strip_suffix('"').map(String::from))
+        .ok_or_else(|| "no repository in Cargo.toml".into())
+}
+
+fn winget_manifests_for(root: &Path, version: &str, setup_name: &str, sha256_hex: &str) -> Result<PathBuf> {
+    let repo = repository(root)?;
+    // github.com/<owner>/<repo> -> package id "<owner>.Bare"
+    let owner = repo.trim_end_matches('/').rsplit('/').nth(1).ok_or("unexpected repository URL")?;
+    let id = format!("{owner}.Bare");
+    let sha = sha256_hex.to_ascii_uppercase();
+    let today = {
+        // Days since 1970 to a calendar date (Howard Hinnant's civil_from_days).
+        let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64 / 86_400;
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = yoe + era * 400 + i64::from(m <= 2);
+        format!("{y:04}-{m:02}-{d:02}")
+    };
+    let header = |kind: &str| format!("# Created by `cargo xtask` (release or winget).\n# yaml-language-server: $schema=https://aka.ms/winget-manifest.{kind}.{WINGET_SCHEMA}.schema.json\n\n");
+    let first = owner.chars().next().unwrap_or('_').to_ascii_lowercase();
+    let dir = root.join("dist").join("winget").join("manifests").join(first.to_string()).join(owner).join("Bare").join(version);
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join(format!("{id}.yaml")),
+        format!(
+            "{}PackageIdentifier: {id}\nPackageVersion: {version}\nDefaultLocale: en-US\nManifestType: version\nManifestVersion: {WINGET_SCHEMA}\n",
+            header("version")
+        ),
+    )?;
+    fs::write(
+        dir.join(format!("{id}.installer.yaml")),
+        format!(
+            "{}PackageIdentifier: {id}\nPackageVersion: {version}\nInstallerLocale: en-US\nInstallerType: inno\nScope: user\n\
+InstallModes:\n- interactive\n- silent\n- silentWithProgress\nUpgradeBehavior: install\nProductCode: '{INSTALLER_PRODUCT_CODE}'\nReleaseDate: {today}\n\
+MinimumOSVersion: 10.0.0.0\nAppsAndFeaturesEntries:\n- DisplayName: Bare\n  Publisher: Bare contributors\n  ProductCode: '{INSTALLER_PRODUCT_CODE}'\n\
+Installers:\n- Architecture: x64\n  InstallerUrl: {repo}/releases/download/v{version}/{setup_name}\n  InstallerSha256: {sha}\n\
+ManifestType: installer\nManifestVersion: {WINGET_SCHEMA}\n",
+            header("installer")
+        ),
+    )?;
+    fs::write(
+        dir.join(format!("{id}.locale.en-US.yaml")),
+        format!(
+            "{}PackageIdentifier: {id}\nPackageVersion: {version}\nPackageLocale: en-US\nPublisher: Bare contributors\n\
+PublisherUrl: {repo}\nPublisherSupportUrl: {repo}/issues\nPackageName: Bare\nPackageUrl: {repo}\nLicense: MIT\n\
+LicenseUrl: {repo}/blob/main/LICENSE\nCopyright: Copyright (c) 2026 Bare contributors\n\
+ShortDescription: A minimal, private web browser built on Chromium, with ad and tracker blocking built in.\n\
+Description: |-\n  Bare is a small Chromium browser written in Rust: tabs, an address bar, and nothing else.\n  \
+Ad and tracker blocking is built in (uBlock Origin-style filter lists), browsing is HTTPS-only, and\n  \
+there are no accounts, telemetry, AI features or news feed. Updates are signed and install themselves.\n\
+Moniker: bare\nTags:\n- browser\n- chromium\n- privacy\n- adblock\n- ad-blocker\n- web-browser\n\
+ReleaseNotesUrl: {repo}/releases/tag/v{version}\nManifestType: defaultLocale\nManifestVersion: {WINGET_SCHEMA}\n",
+            header("defaultLocale")
+        ),
+    )?;
+    Ok(dir)
 }
 
 /// The GitHub release description for `version`: its section of CHANGELOG.md, how to get it,

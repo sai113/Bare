@@ -1,0 +1,25 @@
+name: Chromium engine watch
+
+# Every day: is there a stable Chromium engine (CEF build) newer than the one Bare uses?
+# If so, opens an issue saying how to approve it (once per version). Never changes anything
+# itself: approving an engine needs the update-signing key, which stays on your computer.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const watch = require('./.github/scripts/cef-watch.js');
+            await watch.run({ github, context, core });

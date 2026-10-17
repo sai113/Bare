@@ -373,6 +373,9 @@ mod tests {
         for url in ["https://rr3---sn-a5mekn6s.googlevideo.com/videoplayback", "https://ssl.p.jwpcdn.com/player/v/8.51.11/jwplayer.core.controls.js"] {
             assert!(!blocks(&e, url, "https://news.test/", "xmlhttprequest"), "{url}");
         }
+        // allrecipes.com and its sister sites show nothing if their ad-block checker is blocked
+        // (the hosts list blocks it; Bare's own list makes an exception).
+        assert!(!blocks(&e, "https://html-load.com/loader.min.js", "https://www.allrecipes.com/", "script"));
         assert!(blocks(&e, "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js", "https://news.test/", "script"));
         assert!(blocks(&e, "https://www.google-analytics.com/analytics.js", "https://news.test/", "script"));
         assert!(!blocks(&e, "https://news.test/app.js", "https://news.test/", "script"));

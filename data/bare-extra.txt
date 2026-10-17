@@ -67,3 +67,9 @@
 ! The bait scripts of the adblock.turtlecute.org test (the rules it suggests)
 /pagead.js$domain=adblock.turtlecute.org
 /widget/ads.$domain=adblock.turtlecute.org
+!
+! Exceptions: hosts that a hosts-file list blocks outright but that sites need to work.
+! html-load.com: the ad-block checker on allrecipes.com, people.com, investopedia.com and the
+! publisher's other sites, which refuse to show any page without it. (EasyList also leaves its
+! scripts alone and only blocks it as a page or pop-up.)
+@@||html-load.com^
