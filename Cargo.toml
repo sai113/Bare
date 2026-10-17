@@ -1,0 +1,38 @@
+[workspace]
+members = [".", "xtask"]
+
+[package]
+name = "bare"
+version = "0.3.0"
+edition = "2024"
+description = "A minimal, fast, private web browser built on Chromium (CEF). No bloat."
+license = "MIT"
+repository = "https://github.com/sai113/Bare"
+homepage = "https://github.com/sai113/Bare"
+readme = "README.md"
+
+# On Windows the sandboxed build is a DLL loaded by CEF's bootstrap.exe (renamed to Bare.exe).
+[lib]
+crate-type = ["cdylib"]
+
+# Linux/macOS, and Windows without the sandbox (`--no-default-features`), use a normal executable.
+[[bin]]
+name = "bare"
+path = "src/main.rs"
+
+[features]
+default = ["sandbox"]
+sandbox = ["cef/sandbox"]
+
+[dependencies]
+adblock = { version = "0.13.3", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+cef = { version = "=154.5.0", default-features = false }
+ed25519-dalek = "3.0.0"
+sha2 = "0.11.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

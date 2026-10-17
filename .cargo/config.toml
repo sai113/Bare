@@ -1,0 +1,11 @@
+[env]
+# CEF (Chromium) binaries are downloaded here on first build. Not committed (see .gitignore).
+CEF_PATH = { value = "vendor/cef", relative = true }
+
+# Where Bare looks for updates (built into the app), and where `cargo xtask release` says the
+# release archives will be uploaded. Both are GitHub Releases of sai113/Bare.
+BARE_UPDATE_URL = "https://github.com/sai113/Bare/releases/latest/download/latest.txt"
+BARE_DOWNLOAD_URL = "https://github.com/sai113/Bare/releases/download/v{version}/{file}"
+
+[alias]
+xtask = "run --release -p xtask --"

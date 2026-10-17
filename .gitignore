@@ -1,0 +1,17 @@
+# Build output
+/target
+# Packaged app and release archives (cargo xtask package / release)
+/dist
+# Chromium (CEF) runtime, downloaded on first build (~240 MB)
+/vendor
+
+# Editors and OS clutter
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Never commit the update-signing key (it lives in ~/.bare/ by default)
+*.key

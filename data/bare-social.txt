@@ -1,0 +1,25 @@
+[Adblock Plus 2.0]
+! Title: Bare social widgets (network)
+! Description: Social networks' scripts, widgets and APIs when embedded on other sites.
+!   Loaded with Fanboy's Social list (which hides the buttons) when "Block social media
+!   widgets" is on. The networks' own sites keep working.
+! License: MIT (part of Bare)
+!
+! Facebook / Meta
+||connect.facebook.net^$third-party,domain=~facebook.com|~messenger.com|~instagram.com|~meta.com|~threads.net|~workplace.com
+||graph.facebook.com^$third-party
+||www.facebook.com/plugins/$third-party
+||www.facebook.com/tr$third-party
+! X / Twitter
+||platform.twitter.com^$third-party,domain=~twitter.com|~x.com
+||syndication.twitter.com^$third-party,domain=~twitter.com|~x.com
+||platform.x.com^$third-party,domain=~twitter.com|~x.com
+! Pinterest
+||widgets.pinterest.com^$third-party
+||assets.pinterest.com/js/$third-party
+||log.pinterest.com^$third-party
+! LinkedIn
+||platform.linkedin.com^$third-party
+! Reddit, TikTok embeds
+||embed.reddit.com^$third-party
+||www.tiktok.com/embed.js$third-party

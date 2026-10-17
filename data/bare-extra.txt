@@ -1,0 +1,21 @@
+[Adblock Plus 2.0]
+! Title: Bare extra blocking
+! Description: Analytics and device telemetry endpoints that the larger lists miss.
+!   Only hosts whose sole job is collecting data, so blocking them can't break a site.
+! License: MIT (part of Bare)
+!
+! Product analytics ingestion (the vendors' own dashboards stay reachable)
+||eu.posthog.com^
+||eu.i.posthog.com^
+||us.i.posthog.com^
+||rudderstack.com^$third-party
+||dataplane.rudderstack.com^
+||udc.yahoo.com^
+!
+! Device and smart-TV telemetry
+||xp.apple.com^
+||us.ibs.lgappstv.com^
+||ngfts.lge.com^
+||amoeba.web.roku.com^
+||tvinteractive.tv^
+||settings-win.data.microsoft.com^

@@ -1,0 +1,10 @@
+# Normalise line endings in the repository.
+* text=auto
+
+# Filter lists are data: keep them byte-for-byte as downloaded (the blocker caches a compiled
+# copy keyed on their exact contents).
+data/*.txt -text
+
+# Binary assets.
+*.ico binary
+*.png binary
