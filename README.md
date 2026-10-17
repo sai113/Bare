@@ -40,7 +40,7 @@ Prefer no installer? Download `Bare-<version>-windows-x86_64.zip` instead, unzip
 | Passwords | After you sign in, a bar offers to **Save** the password (or **Never for this site**). On that site later, press **🔑** in the address bar to fill it in (a menu if you have several accounts). `bare://passwords` (Settings → Privacy → Manage passwords) lists them: search, show (after Windows Hello confirms it's you), delete, and **import** a CSV export from Chrome, Edge, Brave, Firefox or Bitwarden. Nothing is saved in private windows |
 | Zoom | `Ctrl` `+` / `-` / `0`. A **125%** indicator appears when a page isn't at 100%; click it to reset. Remembered per site |
 | Picture-in-picture | Right-click a video → **Picture in picture**, or `Alt+P` for the video on the page |
-| Navigation | `Alt+Left` / `Alt+Right`, `F5` or `Ctrl+R` to reload |
+| Navigation | `Alt+Left` / `Alt+Right`, `F5` or `Ctrl+R` to reload, **🏠** or `Alt+Home` for your search engine's home page |
 | Downloads | `Ctrl+J` or the ↓ button opens `bare://downloads`: progress, pause/resume, cancel, open, show in folder. The ↓ button shows live progress. Files go to your Downloads folder, or Bare can ask each time |
 | Settings | The ⚙ button opens `bare://settings`: search engine, new-tab page, blocking, per-site exceptions, download location, clearing browsing data, Bare updates and **Chromium engine updates** |
 | Blocker | The toolbar shows how many requests were blocked on the page. Click it to turn blocking off for a site that breaks (remembered; manage the list in Settings) |
@@ -69,14 +69,15 @@ Lists, in `data/`, are loaded at startup and compiled once into a cache in the p
 | [EasyPrivacy](https://easylist.to) | Trackers | GPLv3 / CC BY-SA 3.0 |
 | [HaGeZi Multi PRO](https://github.com/hagezi/dns-blocklists) | Ads, trackers, device and app telemetry (TikTok, Yandex, Xiaomi, Huawei, …) | GPLv3 |
 | [StevenBlack hosts](https://github.com/StevenBlack/hosts) | Ad, tracking and malware domains | MIT |
-| Bare extra (`data/bare-extra.txt`) | Analytics and device telemetry the big lists miss (PostHog, LG/Roku TV, Windows settings telemetry, …), YouTube ad tracking (`s.youtube.com`, which also stops YouTube recording watch history), Instagram's API on other sites, Branch link tracking | MIT |
+| Bare extra (`data/bare-extra.txt`) | Analytics and device telemetry the big lists miss (PostHog, LG/Roku TV, Windows settings telemetry, …), YouTube ad tracking (`s.youtube.com`, which also stops YouTube recording watch history), Instagram's API on other sites, Branch and Mailchimp click tracking, FreeWheel ads, Intercom chat, OneSignal, JW Player analytics | MIT |
+| Bare cookie consent (`data/bare-cookies.txt`) | The consent services behind cookie banners: Cookiebot, OneTrust, Osano, TrustArc, Didomi, Sourcepoint, Usercentrics | MIT |
 
 Optional, off by default (Settings → Ad and tracker blocking):
 
 | Switch | Lists | Trade-off |
 |---|---|---|
 | **Block social media widgets** | [Fanboy's Social](https://easylist.to) (hides share buttons) + `data/bare-social.txt` (blocks Facebook, X, Pinterest, LinkedIn scripts and embeds on *other* sites) | "Log in with Facebook" and embedded posts on other sites stop working. The networks' own sites are unaffected |
-| **Hide cookie banners** | [EasyList Cookie](https://easylist.to) (hides the banners) + `data/bare-cookies.txt` (blocks Cookiebot, TrustArc, Didomi, Sourcepoint and Usercentrics) | You don't see consent choices; sites usually fall back to necessary cookies only |
+| **Hide cookie banners** | [EasyList Cookie](https://easylist.to) (hides the banners sites show themselves) | You don't see consent choices; sites usually fall back to necessary cookies only |
 
 Switching these takes effect within a few seconds, without restarting.
 

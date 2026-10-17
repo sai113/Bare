@@ -39,3 +39,31 @@
 ! Malware and unwanted software
 ||2giga.link^
 ||greatis.com^
+!
+! Ad servers (FreeWheel)
+||bea4.v.fwmrm.net^
+||2975c.v.fwmrm.net^
+!
+! Affiliate tracking (impact.com's own site keeps working)
+||api.impact.com^
+||impact.com^$third-party
+!
+! Push notifications (Bare refuses notification requests anyway)
+||api.onesignal.com^
+!
+! Live feature-flag updates (sites keep the settings they loaded with)
+||clientstream.launchdarkly.com^
+!
+! Support chat widget (the "chat with us" bubble on some sites goes away)
+||widget.intercom.io^
+!
+! Email click tracking inside pages (links in newsletters still open: Bare never blocks
+! a page you go to directly)
+||click.mailchimp.com^
+!
+! JW Player's analytics. Not the whole host: the video player itself comes from there.
+||ssl.p.jwpcdn.com/player/*/jwpsrv.js
+!
+! The bait scripts of the adblock.turtlecute.org test (the rules it suggests)
+/pagead.js$domain=adblock.turtlecute.org
+/widget/ads.$domain=adblock.turtlecute.org

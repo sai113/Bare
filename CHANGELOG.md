@@ -2,6 +2,13 @@
 
 Each section becomes the notes of that version's GitHub release (`cargo xtask release` copies it into `dist/release-notes.md`). Write for people using Bare: what they'll notice, not how it was built.
 
+## 0.8.0
+
+- **🏠 Home button** next to reload (or Alt+Home): goes to your search engine's home page.
+- **Cookie-consent services are now always blocked** (Cookiebot, OneTrust, Osano, TrustArc, Didomi, Sourcepoint, Usercentrics), not only with Hide cookie banners on. Most sites simply skip the banner. If one shows nothing until you accept cookies, click the blocked count in the toolbar to turn blocking off for that site.
+- **More blocking:** FreeWheel video ads, impact.com affiliate tracking, OneSignal push notifications, LaunchDarkly live updates, Mailchimp click tracking inside pages (links in newsletters still open), and JW Player's analytics (its videos still play).
+- **Intercom chat bubbles are blocked**, so the "chat with us" button disappears on sites that use it. Turn blocking off for a site if you need its chat.
+
 ## 0.7.0
 
 - **🔊 on tabs that play sound.** Click it to mute the tab (it turns into 🔇); click again to unmute. The tab stays muted until you unmute it.
@@ -12,6 +19,7 @@ Each section becomes the notes of that version's GitHub release (`cargo xtask re
   - Instagram's tracking when other sites load it (instagram.com itself keeps working).
   - Branch link tracking, VK's retargeting pixel, and two malware sites.
 - **Hide cookie banners** (Settings → Ad and tracker blocking) now also blocks the consent services behind the banners: Cookiebot, TrustArc, Didomi, Sourcepoint and Usercentrics.
+- **What's new** in Settings → About opens these notes for the version you're running.
 
 ## 0.6.0
 

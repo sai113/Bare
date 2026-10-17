@@ -176,6 +176,8 @@ enum Action {
     PrevTab,
     FocusAddress,
     Reload,
+    /// 🏠: the search engine's home page in the current tab.
+    Home,
     Back,
     Forward,
     DevTools,
@@ -233,6 +235,7 @@ const SHORTCUTS: &[(Action, c_int, bool, bool, bool)] = &[
     (Action::FocusAddress, 0x75, false, false, false), // F6
     (Action::Reload, 0x74, false, false, false),      // F5
     (Action::Reload, 0x52, false, true, false),       // Ctrl+R
+    (Action::Home, 0x24, false, false, true),         // Alt+Home
     (Action::Back, 0x25, false, false, true),         // Alt+Left
     (Action::Forward, 0x27, false, false, true),      // Alt+Right
     (Action::DevTools, 0x7B, false, false, false),    // F12
@@ -554,6 +557,7 @@ impl Ui {
         let back = button("←", Action::Back, "Back (Alt+Left)");
         let forward = button("→", Action::Forward, "Forward (Alt+Right)");
         let reload = button("↻", Action::Reload, "Reload (F5)");
+        let home = button("🏠", Action::Home, "Home: your search engine (Alt+Home)");
         let address = textfield_create(Some(&mut Address::new())).expect("textfield");
         let star = button("☆", Action::ToggleBookmark, "Bookmark this page (Ctrl+D)");
         let reader = button("📖", Action::Reader, "Reader view (F9)");
@@ -572,6 +576,7 @@ impl Ui {
             View::from(&back),
             View::from(&forward),
             View::from(&reload),
+            View::from(&home),
             View::from(&address),
             View::from(&key),
             View::from(&reader),
@@ -872,6 +877,10 @@ impl Ui {
             Action::NextTab if n > 0 => self.select((self.active + 1) % n),
             Action::PrevTab if n > 0 => self.select((self.active + n - 1) % n),
             Action::FocusAddress => self.focus_address(),
+            Action::Home => {
+                let home = settings::get().search.home();
+                self.load_in_active(home);
+            }
             Action::Reload | Action::Back | Action::Forward | Action::DevTools => {
                 let Some(b) = browser else { return };
                 match action {

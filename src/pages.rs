@@ -433,7 +433,7 @@ function render(s){
     toggle('blocking',s.blocking,'Block ads, trackers and malware','EasyList, EasyPrivacy, HaGeZi Pro and a malware/tracking domain list.'),
     toggle('cosmetic',s.cosmetic,'Hide leftover ad boxes','Removes empty spaces where blocked ads would have been.'),
     toggle('social',s.social,'Block social media widgets','Facebook, X, Pinterest and similar buttons, embeds and trackers on other sites. "Log in with Facebook" may stop working.'),
-    toggle('cookies',s.cookies,'Hide cookie banners','Hides cookie-consent pop-ups and blocks the consent services behind them (Cookiebot, TrustArc, Didomi, Usercentrics, …). Sites then usually fall back to necessary cookies only.'));
+    toggle('cookies',s.cookies,'Hide cookie banners','Hides the cookie-consent pop-ups sites show themselves. (The consent services behind most banners, such as Cookiebot, OneTrust and TrustArc, are always blocked.) Sites then usually fall back to necessary cookies only.'));
   document.getElementById('allowed').replaceChildren(...sites);
   document.getElementById('downloads').replaceChildren(toggle('ask',s.ask,'Ask where to save each file','Otherwise files go to your Downloads folder.'));
   renderNetwork(s);

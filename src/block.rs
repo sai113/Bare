@@ -24,16 +24,17 @@ static ENGINE: RwLock<Option<Arc<Engine>>> = RwLock::new(None);
 static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Filter lists in the app's `data` folder, always on.
-const LISTS: [(&str, FilterFormat); 5] = [
+const LISTS: [(&str, FilterFormat); 6] = [
     ("easylist.txt", FilterFormat::Standard),
     ("easyprivacy.txt", FilterFormat::Standard),
     ("hagezi-pro.txt", FilterFormat::Standard),
     ("bare-extra.txt", FilterFormat::Standard),
+    ("bare-cookies.txt", FilterFormat::Standard),
     ("blocklist.txt", FilterFormat::Hosts),
 ];
 /// Optional lists, switched on in Settings.
 const SOCIAL_LISTS: [&str; 2] = ["fanboy-social.txt", "bare-social.txt"];
-const COOKIE_LISTS: [&str; 2] = ["easylist-cookie.txt", "bare-cookies.txt"];
+const COOKIE_LISTS: [&str; 1] = ["easylist-cookie.txt"];
 
 /// Which optional lists are on.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -289,10 +290,32 @@ mod tests {
         assert!(!blocks(&extra, "https://i.instagram.com/api/v1/x", "https://www.instagram.com/", "xmlhttprequest"));
         // The rest of vk.com is untouched.
         assert!(!blocks(&extra, "https://vk.com/feed", page, "document"));
+        for url in [
+            "https://bea4.v.fwmrm.net/ad/g/1",
+            "https://api.impact.com/x",
+            "https://api.onesignal.com/apps",
+            "https://clientstream.launchdarkly.com/eval/x",
+            "https://widget.intercom.io/widget/abc",
+            "https://click.mailchimp.com/track/open.php",
+            "https://ssl.p.jwpcdn.com/player/v/8.51.11/jwpsrv.js",
+        ] {
+            assert!(blocks(&extra, url, page, "script"), "{url}");
+        }
+        // JW Player itself keeps working; impact.com's own site too.
+        assert!(!blocks(&extra, "https://ssl.p.jwpcdn.com/player/v/8.51.11/provider.html5.js", page, "script"));
+        assert!(!blocks(&extra, "https://impact.com/app.js", "https://impact.com/", "script"));
+        // The ad-block test's bait scripts, only on that site.
+        assert!(blocks(&extra, "https://adblock.turtlecute.org/js/pagead.js", "https://adblock.turtlecute.org/", "script"));
+        assert!(blocks(&extra, "https://adblock.turtlecute.org/js/widget/ads.js", "https://adblock.turtlecute.org/", "script"));
+        assert!(!blocks(&extra, "https://news.test/js/widget/ads.js", page, "script"));
 
         let cookies = engine_from(vec![list("bare-cookies.txt")]);
         assert!(blocks(&cookies, "https://consent.cookiebot.com/uc.js", page, "script"));
         assert!(blocks(&cookies, "https://app.usercentrics.eu/browser-ui/latest/loader.js", page, "script"));
+        assert!(blocks(&cookies, "https://cmp.osano.com/x/osano.js", page, "script"));
+        assert!(blocks(&cookies, "https://privacyportal.onetrust.com/request/v1/x", page, "xmlhttprequest"));
+        // On by default now.
+        assert!(blocks(&shipped_engine(Extras::default()), "https://consent.cookiebot.com/uc.js", page, "script"));
         assert!(!blocks(&cookies, "https://www.cookiebot.com/en/", "https://www.cookiebot.com/", "document"));
     }
 
@@ -347,7 +370,7 @@ mod tests {
         }
         // Things that must keep working.
         // (YouTube's video servers; its redirector is blocked, which playback doesn't need.)
-        for url in ["https://rr3---sn-a5mekn6s.googlevideo.com/videoplayback", "https://click.mailchimp.com/track/click"] {
+        for url in ["https://rr3---sn-a5mekn6s.googlevideo.com/videoplayback", "https://ssl.p.jwpcdn.com/player/v/8.51.11/jwplayer.core.controls.js"] {
             assert!(!blocks(&e, url, "https://news.test/", "xmlhttprequest"), "{url}");
         }
         assert!(blocks(&e, "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js", "https://news.test/", "script"));

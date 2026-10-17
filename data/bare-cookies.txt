@@ -1,14 +1,18 @@
 [Adblock Plus 2.0]
 ! Title: Bare cookie-consent managers (network)
-! Description: The consent-manager services behind cookie banners. Loaded with EasyList
-!   Cookie (which hides the banners) when "Hide cookie banners" is on. A few sites wait for
-!   their consent manager before showing content; turn blocking off for those sites.
+! Description: The consent-manager services behind cookie banners. Always on. Most sites
+!   simply skip the banner without them; for one that waits for its consent manager
+!   before showing content, turn blocking off for that site.
 ! License: MIT (part of Bare)
 !
 ! Cookiebot
 ||consent.cookiebot.com^
 ||consentcdn.cookiebot.com^
 ||cookiebot.com^$third-party
+! OneTrust
+||privacyportal.onetrust.com^$third-party
+! Osano
+||cmp.osano.com^
 ! TrustArc
 ||consent.trustarc.com^
 ! Didomi
